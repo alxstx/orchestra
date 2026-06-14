@@ -11,9 +11,13 @@ author = "opus"
 # reviewer = "<codex-model-id>"
 
 [max_rounds]
-highlevel = 6                  # Stage A is human-driven; this is a safety cap
-impl_plan = 4                  # Stage B auto-loop cap
-implementation = 5             # Stage C auto-loop cap
+# Hard ceiling on review rounds per stage (DESIGN §4.1). If a stage hasn't settled
+# to APPROVE within its ceiling, the loop STOPS IMMEDIATELY and flags (stuck) — it
+# never runs an extra round and never auto-advances with unresolved blockers.
+# APPROVE (clean OR with nits) settles at any round; nits never add a round.
+highlevel = 15                 # Stage A is human-driven; generous safety cap
+impl_plan = 15                 # Stage B auto-loop ceiling
+implementation = 15            # Stage C auto-loop ceiling
 
 # Per-stage APPROVE confidence floor. An APPROVE below the floor downgrades to
 # awaiting_human instead of auto-advancing. 0 = disabled. Most useful on the
@@ -50,4 +54,7 @@ call_timeout_seconds = 600     # per claude/codex subprocess; a hung child is ki
 [behavior]
 fresh_author_on_revise = true  # true = fresh session each revise round (independence)
                                # false = resume author session (cheaper, carries context)
+stop_on_oscillation = false    # false = give a stage its full max_rounds before giving up
+                               #   (oscillation only surfaced as a warning); true = bail
+                               #   early to stuck(oscillation) as soon as a loop is detected
 dry_run = false                # print the claude/codex commands instead of running them

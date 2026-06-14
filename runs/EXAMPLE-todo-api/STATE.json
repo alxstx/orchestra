@@ -13,7 +13,7 @@
   "attempts": 0,
   "tokens_spent": 41234,
   "config": {
-    "max_rounds": { "highlevel": 6, "impl_plan": 4, "implementation": 5 },
+    "max_rounds": { "highlevel": 15, "impl_plan": 15, "implementation": 15 },
     "min_confidence": { "highlevel": 0, "impl_plan": 0, "implementation": 0.6 },
     "models": { "author": "opus", "reviewer": null },
     "budget": { "wall_clock_seconds": 3600, "tokens": 2000000, "call_timeout_seconds": 600 }

@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.2). This document is the spec. The orchestrator
+> Status: **design phase** (v0.3). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -28,20 +28,25 @@ state, no conversation memory leaking between author and reviewer — just files
 
 ### Design principles
 
-1. **Fresh sessions across the boundaries that matter.** Every author step and
-   every review step crosses a fresh-session boundary: a new
+1. **Fresh sessions are the whole value.** Codex catches what Claude misses
+   *precisely because* it does not share Claude's context — a reviewer that
+   inherits the author's context inherits the author's blind spots. So every
+   author step and every review step crosses a fresh-session boundary: a new
    `claude --session-id <new-uuid>` or a new `codex exec`. The **author/reviewer**
    boundary and the **cross-stage** boundary are *always* fresh — never
-   `--resume` across them. (Intra-stage author revisions and Stage A's
-   interactive conversation are the two calibrated exceptions; see §2 and §13.)
+   `--resume` across them; this independence is non-negotiable. (Intra-stage
+   author revisions and Stage A's interactive conversation are the two calibrated
+   exceptions; see §2 and §13.)
 2. **Blackboard, not message-passing.** State lives in files under `runs/<run>/`.
    Any step can be re-run by pointing a fresh agent at the same files. This makes
    the whole pipeline auditable (it's just Markdown + JSON in git) and resumable.
-3. **Machine-readable, self-consistent verdicts.** Codex emits a JSON verdict
-   against a fixed schema (`schemas/verdict.schema.json`) *in addition* to its
-   prose review. The schema *structurally* enforces the one invariant the whole
-   loop rests on — `APPROVE` ⟺ no blocking issues — so a self-contradictory
-   verdict can't slip an artifact through (§7).
+3. **Machine-readable verdicts make the loop self-terminating.** Codex emits a
+   JSON verdict against a fixed schema (`schemas/verdict.schema.json`) *in
+   addition* to its prose review. Without it, "automatic back-and-forth" never
+   knows when to stop; with it, the loop advances or halts on its own instead of
+   you eyeballing every round. The schema *structurally* enforces the one
+   invariant the whole loop rests on — `APPROVE` ⟺ no blocking issues — so a
+   self-contradictory verdict can't slip an artifact through (§7).
 4. **Gates calibrated per stage.** Human involvement is high where judgment
    matters most (the high-level plan) and tapers to zero where the work is
    mechanical (implementation). See §5.
@@ -199,14 +204,15 @@ def run_stage(stage, blackboard, cfg):
         if verdict.decision == "APPROVE":
             if low_confidence(verdict, cfg, stage):  # §7 confidence rule
                 return AWAITING_HUMAN(reason="approval")
-            return CONVERGED
+            return CONVERGED(nits=verdict.non_blocking_suggestions)  # nits carried fwd, never looped
         if verdict.decision == "REJECT":
             return STUCK(reason="rejected")          # fundamental flaw → human
-        if oscillating(blackboard, stage):           # orchestrator-computed, §10
-            return STUCK(reason="oscillation")
+        annotate_oscillation(blackboard, stage)      # always surface the signal (§10)
+        if cfg.stop_on_oscillation and oscillating(blackboard, stage):
+            return STUCK(reason="oscillation")        # opt-in early bail; default OFF
         artifact = author_revise(stage, artifact,    # fresh Claude (or resume per cfg)
                                  verdict.blocking_issues, blackboard)
-    return STUCK(reason="max_rounds")
+    return STUCK(reason="max_rounds")                # ceiling hit, still REVISE → flag & stop now
 ```
 
 - **CONVERGED** → APPROVE+gate logic (§8) decides the next status: `awaiting_human`
@@ -221,6 +227,48 @@ Round 0 is the initial author draft (no review yet); round *k* (k ≥ 1) is the
 most **N−1 revisions** after the initial draft. On resume, the starting round is
 derived as the max round recorded in `history` for the current stage — never a
 possibly-stale counter.
+
+### 4.1 Convergence ceiling & settle rules
+
+The loop is bounded by a **hard ceiling** — `max_rounds[stage]`, default **15**
+for the automatic stages — plus a fixed decision applied at every round and
+decisively at the ceiling. Read each round's verdict as one of four states:
+`APPROVE` (clean), `APPROVE` **+ nits** (no blockers but ≥1
+`non_blocking_suggestion`), `REVISE` (≥1 blocker), or `REJECT`.
+
+1. **APPROVE — clean or with nits — settles immediately.** At *any* round an
+   APPROVE ends the loop. **Nits never block and never add a round**: they are
+   recorded and *carried forward* (surfaced to the human at the gate, and into the
+   next stage's author context / the final PR), and the orchestrator logs
+   `converged (clean)` vs `converged (with N nits)`. (The §7 confidence gate may
+   still downgrade a low-confidence *autonomous* APPROVE to `awaiting_human`.)
+   → *honors "after the cap, if it's approved with nits, just proceed."*
+2. **Ceiling reached without APPROVE → stop immediately, flag.** If a stage runs
+   its full `max_rounds` reviews and the last verdict is still `REVISE`, the loop
+   does **not** run another round and does **not** auto-advance with open
+   blockers. It halts at `stuck(max_rounds)` and flags loudly (status + `LOG.md` +
+   the M4 notification hook). "Stop immediately" = no grace round.
+   → *honors "after 15 max back-and-forths, if not approved, flag and stop."*
+3. **Still revising at the ceiling = probably a loop.** `stuck(max_rounds)` after a
+   full ceiling of `REVISE` verdicts *is* the "it's just running a loop" signal.
+   The flag carries the oscillation digest — which blocking issues recurred and how
+   often (orchestrator-computed content keys, §10) — so you can see *why* it never
+   settled. → *honors "if it's still revised, stop — maybe it's just looping."*
+
+**Early stop vs full allotment.** By default the loop spends a stage's full ceiling
+trying to settle (`behavior.stop_on_oscillation = false`): oscillation is surfaced
+as a per-round warning but does not cut the attempt short — you asked it to get up
+to 15 tries before concluding it's stuck. Flip `stop_on_oscillation = true` to bail
+the moment a loop is detected (ending at `stuck(oscillation)` rather than
+`stuck(max_rounds)`) — cheaper, but fewer chances to recover. Either way the
+**budget** (§9) is the hard cost backstop beneath the round ceiling.
+
+**"Proceed to next stage" ≠ skip the human.** These rules govern the *automatic
+loop* only. A settled (APPROVE) Stage B still hands off to its **approval gate**
+(you sign off the plan) before Stage C; only the `none`-gate Stage C proceeds
+straight to done (§5, §8). `REJECT`, where enabled, can end a loop before the
+ceiling (`stuck(rejected)`); whether the automatic stages may emit REJECT at all is
+an open item (§13).
 
 ## 5. Human-in-the-loop mechanism
 
@@ -376,6 +424,11 @@ Loop interpretation:
   the `none`-gate Stage C), the APPROVE downgrades to `awaiting_human` instead of
   auto-advancing. If you don't want this safeguard, set the threshold to 0; the
   field then records confidence without gating.
+- **Nits never block.** `non_blocking_suggestions` ("nits") add no rounds and don't
+  hold up an APPROVE. The orchestrator distinguishes `converged (clean)` from
+  `converged (with N nits)` and **carries the nits forward** — to the human at the
+  gate and into the next stage / final PR — but never iterates to polish them
+  (§4.1).
 - `REVISE` → ≥1 `blocking_issue`; feed them (and the brief/plan) to the next author
   round.
 - `REJECT` → fundamental flaw iteration won't fix → escalate immediately
@@ -440,7 +493,7 @@ resumable to the right next action (not a re-run of completed work):
   "attempts": 0,
   "tokens_spent": 41234,
   "config": {
-    "max_rounds": { "highlevel": 6, "impl_plan": 4, "implementation": 5 },
+    "max_rounds": { "highlevel": 15, "impl_plan": 15, "implementation": 15 },
     "min_confidence": { "highlevel": 0, "impl_plan": 0, "implementation": 0.6 }
   },
   "last_verdict": { "decision": "REVISE", "...": "..." },
@@ -465,7 +518,9 @@ mechanically:
   (default 600s); a hung child is killed → retry/escalate.
 - 🔧 The *enforcement points* are fixed here; the accounting code is M1/M3.
   `orchestra.example.toml` ships a **non-zero default budget** (not "unlimited"),
-  so a runaway is capped out of the box.
+  so a runaway is capped out of the box. With the default 15-round ceiling (§4.1),
+  the budget — not the round count — is the real cost guardrail: a genuinely
+  looping stage normally trips the token/wall-clock cap before it reaches round 15.
 
 ## 10. Failure modes & safeguards
 
@@ -475,7 +530,7 @@ mechanically:
 | Risk | Safeguard |
 |------|-----------|
 | **Loop runaway / cost blowup** | hard `max_rounds` per stage **and** token + wall-clock budgets with defined check points (§9); `--dry-run` prints commands without spending. 🔧 |
-| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and escalates to `stuck(oscillation)` when, over a 2-round window, the blocking-issue count does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. 🔧 |
+| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and detects non-improvement when, over a 2-round window, the blocking-issue count does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
 | **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in clearly delimited blocks; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
 | **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex exec review --base`. |
 | **Reviewer mutates workspace** | reviewer always read-only (`codex exec --sandbox read-only`; review subcommand is intrinsically read-only). |
@@ -499,7 +554,8 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   defaults).
 - `sandbox` / permission mode: per stage (least privilege).
 - `gate`: `heavy` / `some` / `none` per stage (defaults follow §2).
-- `behavior.fresh_author_on_revise`, `behavior.dry_run`.
+- `behavior.fresh_author_on_revise`, `behavior.stop_on_oscillation`,
+  `behavior.dry_run`.
 
 ## 12. Roadmap
 
@@ -537,6 +593,14 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 
 ## Changelog
 
+- **v0.3** — added the convergence ceiling & settle rules (§4.1): a hard per-stage
+  round ceiling (default 15) with explicit terminal behavior — APPROVE (clean or
+  with nits) settles immediately and carries nits forward; hitting the ceiling
+  while still revising stops immediately and flags as a likely loop. Made the
+  oscillation guard advisory-by-default (`behavior.stop_on_oscillation`) so a stage
+  gets its full allotment of attempts, with the budget as the hard cost backstop.
+  Sharpened the two load-bearing principles in §1 (fresh-sessions-as-the-point;
+  verdict-as-self-termination).
 - **v0.2** — hardened against a 5-lens multi-agent adversarial review of v0.1
   (state-machine correctness, prompt-injection/trust boundaries, cost/operability,
   fidelity to the intended workflow, and CLI-flag verification against ground-truth
