@@ -19,6 +19,10 @@ RUNS_DIR = Path(__file__).parent / "runs"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SCHEMAS_DIR = Path(__file__).parent / "schemas"
 
+# Canonical stage names (as written in STATE.json) and their A/B/C display letters.
+STAGE_NAMES = ["highlevel", "impl_plan", "implementation"]
+STAGE_LETTERS = {"highlevel": "A", "impl_plan": "B", "implementation": "C"}
+
 
 # --------------------------------------------------------------------------- #
 # state — load/save STATE.json, transitions, history (schemas/state.schema.json)
@@ -114,7 +118,10 @@ def resume(run_dir: Path) -> str:
 # cli
 # --------------------------------------------------------------------------- #
 def cmd_init(args: argparse.Namespace) -> None:
-    """Create runs/<date>-<slug>/, seed 00-brief.md, write initial STATE.json."""
+    """Create runs/<date>-<slug>/, seed 00-brief.md (+ 10-highlevel-plan.md when
+    --highlevel-plan is given), and write STATE.json at the requested --stage with
+    status=authoring, round=0. M1 input contract: `init <slug> --stage impl_plan
+    --brief <f> --highlevel-plan <f>` (DESIGN §12)."""
     raise NotImplementedError("M1")
 
 
@@ -150,11 +157,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="create a new run")
     s.add_argument("slug")
     s.add_argument("--brief", type=Path, help="path to a brief file")
+    s.add_argument("--stage", choices=STAGE_NAMES, default="highlevel",
+                   help="seed the run at this stage (M1 input contract, e.g. impl_plan)")
+    s.add_argument("--highlevel-plan", type=Path,
+                   help="pre-approved high-level plan to seed (required when --stage=impl_plan)")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("run", help="drive the pipeline")
     s.add_argument("run")
-    s.add_argument("--stage", choices=["A", "B", "C"])
+    s.add_argument("--stage", choices=STAGE_NAMES,
+                   help="run a specific stage (letters A/B/C map to "
+                        "highlevel/impl_plan/implementation via STAGE_LETTERS)")
     s.add_argument("--interactive", action="store_true")
     s.set_defaults(func=cmd_run)
 

@@ -16,7 +16,8 @@
     "max_rounds": { "highlevel": 15, "impl_plan": 15, "implementation": 15 },
     "min_confidence": { "highlevel": 0, "impl_plan": 0, "implementation": 0.6 },
     "models": { "author": "opus", "reviewer": null },
-    "budget": { "wall_clock_seconds": 3600, "tokens": 2000000, "call_timeout_seconds": 600 }
+    "reviewer": { "primary": "codex", "fallback": "claude", "on_limit": "fallback" },
+    "budget": { "wall_clock_seconds": 0, "call_timeout_seconds": 600 }
   },
   "last_verdict": {
     "decision": "APPROVE",
@@ -27,6 +28,7 @@
     "non_blocking_suggestions": [
       { "id": "N1", "title": "Consider pagination", "detail": "List endpoint may grow; note it as a future concern." }
     ],
+    "reject_reason": null,
     "addressed_previous": ["B1", "B2"]
   },
   "history": [

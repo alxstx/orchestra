@@ -1,7 +1,8 @@
 <!-- Stage A review. Rendered with: {{brief}}, {{highlevel_plan}},
      {{prior_issues}} (open issues from earlier rounds, if any). Run with
-     `codex exec --sandbox read-only --output-schema schemas/verdict.schema.json
-     --output-last-message <verdict.json>`; prose review goes to stdout. -->
+     `codex exec - --sandbox read-only --output-schema schemas/verdict.schema.json
+     --output-last-message <verdict.json>`. No prose on stdout — the human-readable
+     review is the verdict's review_markdown field (v0.6). -->
 
 You are an **independent reviewer**. You did not write this plan and you have no
 stake in it. Critique the **high-level plan** below against the brief.

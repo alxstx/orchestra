@@ -27,8 +27,8 @@
     },
     "stuck_reason": {
       "type": ["string", "null"],
-      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "error", null],
-      "description": "Required + non-null when status == stuck. 'monitor' = the supervisory overseer intercepted (DESIGN §10.1). Null otherwise."
+      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "reviewer_unavailable", "error", null],
+      "description": "Required + non-null when status == stuck. 'monitor' = overseer intercepted (§10.1); 'reviewer_unavailable' = both Codex and the Claude fallback unavailable (§6.2). Null otherwise."
     },
     "round": {
       "type": "integer",
@@ -64,7 +64,7 @@
     "tokens_spent": {
       "type": "integer",
       "minimum": 0,
-      "description": "Accumulated output tokens. Claude side from .usage.output_tokens; Codex side best-effort from --json events, else bounded by wall-clock/timeout/max_rounds (DESIGN §9)."
+      "description": "Telemetry only (input to the monitor's progress judgement), NOT a spend cap — we run subscriptions, not metered API (DESIGN §9)."
     },
     "config": {
       "type": "object",
@@ -101,9 +101,18 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "wall_clock_seconds": { "type": "integer", "minimum": 0, "description": "0 = unlimited (not recommended)." },
-            "tokens": { "type": "integer", "minimum": 0, "description": "0 = unlimited (not recommended)." },
-            "call_timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-subprocess timeout; a hung child is killed." }
+            "wall_clock_seconds": { "type": "integer", "minimum": 0, "description": "Optional last-resort overall stop; 0 = off. NOT a cost cap (subscription, §9)." },
+            "call_timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-subprocess hang protection; a hung child is killed." }
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Reviewer selection & fallback (DESIGN §6.2).",
+          "properties": {
+            "primary": { "type": "string" },
+            "fallback": { "type": ["string", "null"] },
+            "on_limit": { "type": "string", "enum": ["fallback", "pause"] }
           }
         }
       }
@@ -124,6 +133,7 @@
           "round": { "type": "integer" },
           "actor": { "type": "string", "enum": ["claude", "codex", "human", "orchestrator"] },
           "verdict": { "type": "string" },
+          "fallback": { "type": "boolean", "description": "True if this review used the Claude reviewer fallback (Codex unavailable), §6.2." },
           "artifact": { "type": "string", "description": "Path to the round's artifact snapshot." },
           "artifact_hash": { "type": "string" },
           "note": { "type": "string" },

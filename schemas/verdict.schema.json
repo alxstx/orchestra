@@ -2,50 +2,48 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alxstx/orchestra/schemas/verdict.schema.json",
   "title": "Codex review verdict",
-  "description": "The machine-readable verdict Codex emits as its final message for each review round (via --output-schema, written by -o/--output-last-message). It is the ONLY output channel: the human-readable review lives in review_markdown (there is no separate prose-on-stdout channel — stdout under --output-schema/--json is JSON, not prose). The allOf enforces the load-bearing invariants: APPROVE iff blocking_issues empty; REVISE has >=1; REJECT must carry justification. The orchestrator treats any inconsistent/invalid verdict as an error to re-prompt once then escalate (never CONVERGED).",
+  "description": "The machine-readable verdict Codex emits as its final message each review round (via --output-schema, written by -o/--output-last-message). IMPORTANT: this schema is consumed by `codex exec --output-schema`, whose backend (OpenAI structured outputs, STRICT mode) FORBIDS allOf/if-then/oneOf and requires EVERY property in `required`, with optionals expressed as nullable. So this schema constrains SHAPE ONLY. The semantic invariants (APPROVE<=>no blockers, REVISE>=1 blocker, REJECT justified) are enforced by the orchestrator's consistent(verdict) check (DESIGN §4/§7) — that is the only enforcement; the schema cannot express it. There is no separate prose channel: the human-readable review is review_markdown (stdout under --output-schema/--json is JSON, not prose).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions"],
+  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions", "reject_reason", "addressed_previous"],
   "properties": {
     "decision": {
       "type": "string",
       "enum": ["APPROVE", "REVISE", "REJECT"],
-      "description": "APPROVE = converged (blocking_issues empty). REVISE = >=1 blocking issue, iterate. REJECT = fundamental flaw iteration won't fix, escalate to human."
+      "description": "APPROVE = converged (consistent() also requires blocking_issues empty). REVISE = iterate (consistent() requires >=1 blocking issue). REJECT = fundamental flaw, escalate (consistent() requires >=1 blocking issue OR a reject_reason)."
     },
     "confidence": {
       "type": "number",
-      "minimum": 0,
-      "maximum": 1,
-      "description": "REQUIRED (it is load-bearing): an APPROVE with confidence below cfg.min_confidence[stage] downgrades to awaiting_human instead of auto-advancing (DESIGN §7). Set the threshold to 0 to disable that gate while still recording confidence."
+      "description": "0..1, the reviewer's confidence. (min/max omitted: strict mode ignores numeric bounds; the orchestrator clamps.) Load-bearing: an APPROVE below cfg.min_confidence[stage] downgrades to awaiting_human (DESIGN §7)."
     },
     "review_markdown": {
       "type": "string",
-      "description": "The full human-readable review, Markdown. The orchestrator renders reviews/<stage>-<round>-review.md from this field. This is the prose channel — do NOT expect prose on stdout."
+      "description": "Full human-readable review, Markdown. The orchestrator renders reviews/<stage>-<round>-review.md from this. The prose channel — do NOT expect prose on stdout."
     },
     "summary": {
       "type": "string",
-      "description": "One-paragraph plain-language verdict (a short digest of review_markdown)."
+      "description": "One-paragraph plain-language digest of review_markdown."
     },
     "blocking_issues": {
       "type": "array",
-      "description": "Issues that MUST be fixed before approval. Empty iff decision is APPROVE (enforced by allOf).",
+      "description": "Issues that MUST be fixed before approval. The orchestrator requires this empty for APPROVE and non-empty for REVISE (the schema can't enforce that in strict mode).",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "severity", "title", "detail", "location", "suggested_fix"],
         "properties": {
-          "id": { "type": "string", "description": "Short id, e.g. B1, B2. NOTE: ids are emitted fresh by an independent reviewer each round and are NOT stable across rounds; the orchestrator must not key oscillation/regression logic on them (DESIGN §10)." },
+          "id": { "type": "string", "description": "Short id, e.g. B1/BI-001. Ids are emitted fresh by an independent reviewer each round and are NOT stable; never key oscillation logic on them (DESIGN §10)." },
           "severity": { "type": "string", "enum": ["critical", "high", "medium"] },
           "title": { "type": "string" },
           "detail": { "type": "string" },
-          "location": { "type": "string", "description": "REQUIRED for blockers: where in the artifact (section / file:line). Used with title to derive the orchestrator's stable content key for oscillation detection." },
-          "suggested_fix": { "type": "string", "description": "A PROPOSAL, not a command. The author addresses the underlying concern and may deviate (noting why) if the literal fix would be unsafe or out of scope." }
+          "location": { "type": "string", "description": "Where in the artifact (section / file:line). Used with title for the orchestrator's stable content key." },
+          "suggested_fix": { "type": "string", "description": "A PROPOSAL, not a command; the author may deviate (noting why) if unsafe or out of scope." }
         }
       }
     },
     "non_blocking_suggestions": {
       "type": "array",
-      "description": "Nice-to-haves ('nits') that do not block approval and never add a round.",
+      "description": "Nits that do not block approval and never add a round. [] if none.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -58,27 +56,13 @@
       }
     },
     "reject_reason": {
-      "type": "string",
-      "description": "Why the artifact should be redone rather than patched. Required for REJECT unless the fundamental flaw is itemized in blocking_issues (enforced by allOf)."
+      "type": ["string", "null"],
+      "description": "Required (non-null) for REJECT unless the flaw is itemized in blocking_issues (orchestrator-enforced). null otherwise."
     },
     "addressed_previous": {
       "type": "array",
-      "description": "IDs of prior-round blocking issues the reviewer judges resolved this round. Advisory only: validated by the orchestrator against the actual prior verdict's ids before being trusted.",
+      "description": "IDs of prior-round blocking issues the reviewer judges resolved this round; [] if none. Advisory: validated by the orchestrator against the actual prior verdict's ids before being trusted.",
       "items": { "type": "string" }
     }
-  },
-  "allOf": [
-    {
-      "if": { "properties": { "decision": { "const": "APPROVE" } }, "required": ["decision"] },
-      "then": { "properties": { "blocking_issues": { "maxItems": 0 } } }
-    },
-    {
-      "if": { "properties": { "decision": { "const": "REVISE" } }, "required": ["decision"] },
-      "then": { "properties": { "blocking_issues": { "minItems": 1 } } }
-    },
-    {
-      "if": { "properties": { "decision": { "const": "REJECT" } }, "required": ["decision"] },
-      "then": { "anyOf": [ { "properties": { "blocking_issues": { "minItems": 1 } } }, { "required": ["reject_reason"] } ] }
-    }
-  ]
+  }
 }

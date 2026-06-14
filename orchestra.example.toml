@@ -10,6 +10,14 @@ author = "opus"
 # pin one. When unset, the orchestrator omits --model on the codex invocation.
 # reviewer = "<codex-model-id>"
 
+# Reviewer selection & fallback (DESIGN §6.2). Codex is primary for cross-model
+# independence; if Codex hits its subscription USAGE limit, fall back to Claude
+# (a fresh, isolated Claude session as reviewer — degraded independence, flagged).
+[reviewer]
+primary = "codex"
+fallback = "claude"
+on_limit = "fallback"            # "fallback" = auto-switch (flagged) | "pause" = stop at awaiting_human
+
 [max_rounds]
 # Hard ceiling on review rounds per stage (DESIGN §4.1). If a stage hasn't settled
 # to APPROVE within its ceiling, the loop STOPS IMMEDIATELY and flags (stuck) — it
@@ -48,20 +56,34 @@ reviewer = "read-only"
 # Fresh sessions stop conversation carryover; these stop config/hooks/MCP/rules
 # leakage and make runs reproducible.
 [isolation]
-claude_bare = true               # --bare: skip hooks/LSP/plugins (or use --safe-mode)
+claude_safe_mode = true          # --safe-mode: disable CLAUDE.md/skills/hooks/plugins/MCP, KEEP auth
+claude_bare = false              # --bare ALSO disables keychain reads -> OAuth/subscription auth FAILS;
+                                 #   only set true if ANTHROPIC_API_KEY is configured
 claude_setting_sources = ""      # --setting-sources "": load no user/project/local settings
 claude_strict_mcp = true         # --strict-mcp-config: ignore ambient MCP servers
 claude_no_session_persistence = true  # --no-session-persistence
+claude_read_only_tools = "Read Grep Glob"  # --tools (HARD restriction) for planning stages
 codex_ignore_user_config = true  # --ignore-user-config
 codex_ignore_rules = true        # --ignore-rules
 codex_ephemeral = true           # --ephemeral: don't persist session files
+# NOTE: Stage A (interactive, heavy HITL) intentionally runs WITHOUT this profile.
 
 # Cost is bounded mechanically, independent of max_rounds (which only bounds
 # iteration count). Non-zero defaults so a runaway is capped out of the box.
+# Runaway/liveness bounds — NOT cost. We run subscriptions, not metered API, so
+# there are no dollar costs to cap (DESIGN §9). max_rounds is the real runaway bound.
 [budget]
-wall_clock_seconds = 3600      # per run; 0 = unlimited (not recommended)
-tokens = 2000000               # per run; 0 = unlimited (not recommended)
-call_timeout_seconds = 600     # per claude/codex subprocess; a hung child is killed
+wall_clock_seconds = 0         # optional last-resort overall stop; 0 = off (default)
+call_timeout_seconds = 600     # per subprocess hang protection; a hung child is killed
+# (no token/dollar caps. Subscription USAGE limits -> reviewer fallback, [reviewer] / §6.2)
+
+# Stage C executed-test gate (DESIGN §2/§10). The orchestrator runs THIS command in
+# the worktree and feeds the result to the reviewer as a trusted field. It is
+# OPERATOR-PROVIDED on purpose — never parsed from the model's plan (that would run
+# an LLM-authored command). Empty = no executed test gate (reviewer reads only).
+[stage_c]
+test_command = ""              # e.g. "pytest -q" or "npm test --silent"
+test_timeout_seconds = 600
 
 # Supervisory monitor (DESIGN §10.1): an optional concurrent overseer that judges
 # run HEALTH (not the artifact) and writes accumulating reports under monitor/.
