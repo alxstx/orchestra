@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alxstx/orchestra/schemas/verdict.schema.json",
+  "title": "Codex review verdict",
+  "description": "The machine-readable verdict Codex emits as its final message for each review round. Drives the convergence loop.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "summary", "blocking_issues", "non_blocking_suggestions"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["APPROVE", "REVISE", "REJECT"],
+      "description": "APPROVE = converged (blocking_issues must be empty). REVISE = at least one blocking issue, iterate. REJECT = fundamental flaw iteration won't fix, escalate to human."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Reviewer's confidence in this verdict."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph plain-language verdict."
+    },
+    "blocking_issues": {
+      "type": "array",
+      "description": "Issues that MUST be fixed before approval. Empty iff decision is APPROVE.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "title", "detail", "suggested_fix"],
+        "properties": {
+          "id": { "type": "string", "description": "Stable short id, e.g. B1, B2." },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium"] },
+          "title": { "type": "string" },
+          "detail": { "type": "string" },
+          "location": { "type": "string", "description": "Where in the artifact (section/file/line), if applicable." },
+          "suggested_fix": { "type": "string" }
+        }
+      }
+    },
+    "non_blocking_suggestions": {
+      "type": "array",
+      "description": "Nice-to-haves that do not block approval.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "detail"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "addressed_previous": {
+      "type": "array",
+      "description": "IDs of prior-round blocking issues the reviewer judges resolved this round. Used for oscillation/regression detection.",
+      "items": { "type": "string" }
+    }
+  }
+}

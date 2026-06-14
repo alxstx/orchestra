@@ -1,0 +1,30 @@
+{
+  "run_id": "EXAMPLE-todo-api",
+  "created_at": "2026-06-13T10:00:00Z",
+  "stage": "impl_plan",
+  "status": "awaiting_human",
+  "round": 2,
+  "gate": "some",
+  "config": {
+    "max_rounds": { "highlevel": 6, "impl_plan": 4, "implementation": 5 },
+    "models": { "author": "claude-opus-4-8", "reviewer": "gpt-5-codex" },
+    "budget": { "wall_clock_seconds": 0, "tokens": 0 }
+  },
+  "last_verdict": {
+    "decision": "APPROVE",
+    "confidence": 0.82,
+    "summary": "The implementation plan is complete and buildable. Round-1 concerns about storage durability and error handling are resolved.",
+    "blocking_issues": [],
+    "non_blocking_suggestions": [
+      { "id": "N1", "title": "Consider pagination", "detail": "List endpoint may grow; note it as a future concern." }
+    ],
+    "addressed_previous": ["B1", "B2"]
+  },
+  "history": [
+    { "stage": "highlevel", "round": 1, "actor": "codex", "verdict": "APPROVE", "ts": "2026-06-13T10:20:00Z" },
+    { "stage": "impl_plan", "round": 1, "actor": "claude", "artifact": "20-impl-plan.md", "ts": "2026-06-13T10:35:00Z" },
+    { "stage": "impl_plan", "round": 1, "actor": "codex", "verdict": "REVISE", "ts": "2026-06-13T10:38:00Z" },
+    { "stage": "impl_plan", "round": 2, "actor": "claude", "artifact": "20-impl-plan.md", "note": "addressed B1, B2", "ts": "2026-06-13T10:45:00Z" },
+    { "stage": "impl_plan", "round": 2, "actor": "codex", "verdict": "APPROVE", "ts": "2026-06-13T10:48:00Z" }
+  ]
+}

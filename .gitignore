@@ -1,0 +1,20 @@
+# Local config (copy of orchestra.example.toml)
+orchestra.toml
+
+# Run working data is local by default — it may contain sensitive briefs/plans.
+# Opt in to committing a run by force-adding it, or flip this policy (DESIGN §13).
+runs/*/
+# ...but keep the illustrative example run tracked:
+!runs/EXAMPLE-todo-api/
+!runs/EXAMPLE-todo-api/**
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

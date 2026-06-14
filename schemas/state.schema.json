@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alxstx/orchestra/schemas/state.schema.json",
+  "title": "Orchestra run state",
+  "description": "STATE.json — the single source of truth for a run. The orchestrator is a pure function of this file plus the blackboard.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "created_at", "stage", "status", "round", "gate", "config"],
+  "properties": {
+    "run_id": { "type": "string", "description": "e.g. 2026-06-13-todo-api" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "stage": {
+      "type": "string",
+      "enum": ["highlevel", "impl_plan", "implementation", "done"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["running", "deciding", "awaiting_human", "converged", "stuck", "error"]
+    },
+    "round": { "type": "integer", "minimum": 0 },
+    "gate": {
+      "type": "string",
+      "enum": ["heavy", "some", "none"],
+      "description": "Human-in-loop level for the current stage."
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "max_rounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "highlevel": { "type": "integer", "minimum": 1 },
+            "impl_plan": { "type": "integer", "minimum": 1 },
+            "implementation": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "author": { "type": "string" },
+            "reviewer": { "type": "string" }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wall_clock_seconds": { "type": "integer", "minimum": 0 },
+            "tokens": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "last_verdict": {
+      "description": "The most recent verdict object (see verdict.schema.json), or null.",
+      "type": ["object", "null"]
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stage", "round", "actor", "ts"],
+        "properties": {
+          "stage": { "type": "string" },
+          "round": { "type": "integer" },
+          "actor": { "type": "string", "enum": ["claude", "codex", "human"] },
+          "verdict": { "type": "string" },
+          "artifact": { "type": "string" },
+          "note": { "type": "string" },
+          "ts": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}
