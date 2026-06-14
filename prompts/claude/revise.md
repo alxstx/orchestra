@@ -40,9 +40,10 @@ Previously resolved — **must stay fixed** (do not reintroduce any of these):
 Revise the {{artifact_label}} to address all blocking issues without drifting from
 the brief / upstream plan and **without regressing any resolved-ledger item**. If
 resolving an issue would require an unsafe or out-of-scope change, address the
-underlying concern safely and explain the deviation. If a blocking issue is wrong
-or over-strict, **dispute** it in the notes (address the concern minimally) rather
-than degrading the {{artifact_label}}. Then, at the very end, append:
+underlying concern safely and explain the deviation. If a blocking issue is wrong or
+over-strict, **dispute** it: emit a fenced `DISPUTES:` block (one line per disputed
+id: `<id>: <rationale>`) that the orchestrator routes to the next reviewer, and
+address the concern minimally rather than degrading the {{artifact_label}}. Then, at the very end, append:
 
 ```
 ## Revision notes (round {{round}})

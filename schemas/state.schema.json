@@ -141,7 +141,37 @@
         "properties": {
           "key": { "type": "string", "description": "Stable content key (normalized location + title)." },
           "title": { "type": "string" },
-          "resolved_round": { "type": "integer" }
+          "resolved_round": { "type": "integer" },
+          "cleared": { "type": "boolean", "description": "Human override (E2): a contested/false ledger entry retired so it no longer forces regression checks." }
+        }
+      }
+    },
+    "accepted_deviations": {
+      "type": "array",
+      "description": "Conceded disputes (DESIGN §5): items the reviewer agreed are won't-fix/accepted. Excluded from oscillation; do not block APPROVE; future reviewers are told these are accepted so they don't re-raise them.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "note", "conceded_round"],
+        "properties": {
+          "key": { "type": "string" },
+          "title": { "type": "string" },
+          "note": { "type": "string" },
+          "conceded_round": { "type": "integer" }
+        }
+      }
+    },
+    "open_disputes": {
+      "type": "array",
+      "description": "Author disputes awaiting a reviewer ruling (transient; carried for resume, DESIGN §5).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "rationale", "raised_round"],
+        "properties": {
+          "ref": { "type": "string" },
+          "rationale": { "type": "string" },
+          "raised_round": { "type": "integer" }
         }
       }
     },

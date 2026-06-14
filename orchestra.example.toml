@@ -65,7 +65,9 @@ claude_bare = false              # --bare ALSO disables keychain reads -> OAuth/
 claude_setting_sources = ""      # --setting-sources "": load no user/project/local settings
 claude_strict_mcp = true         # --strict-mcp-config: ignore ambient MCP servers
 claude_no_session_persistence = true  # --no-session-persistence
-claude_read_only_tools = "Read Grep Glob"  # --tools (HARD restriction) for planning stages
+claude_planning_tools = ""       # --tools: NO tools for planning (input via stdin) so the author
+                                 #   CANNOT read the blackboard — makes the §3 memory slice mechanical
+claude_brownfield_tools = "Read Grep Glob"  # brownfield only: Read confined to the CODEBASE cwd, never run dir
 codex_ignore_user_config = true  # --ignore-user-config
 codex_ignore_rules = true        # --ignore-rules
 codex_ephemeral = true           # --ephemeral: don't persist session files
@@ -109,6 +111,9 @@ mode = "advisory"              # off | advisory (report/warn only) | enforcing (
 interval_seconds = 300         # how often the overseer wakes to assess
 stage_soft_timeout = 1800      # a stage running longer wakes the monitor to JUDGE (does NOT kill)
 intervene_min_confidence = 0.8 # enforcing mode: only halt on an 'intervene' at/above this confidence
+watchdog = "none"              # independent dead/hung detector: "none" | "cron" | "launchd" | "cloud".
+                               #   REQUIRED for unattended runs — a child monitor can't detect a dead
+                               #   parent; only an independent scheduler sees a stale updated_at (§10.1).
 # model = "<judge-model>"      # optional; defaults to a capable judge model
 
 [behavior]

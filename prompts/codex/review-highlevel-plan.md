@@ -29,6 +29,16 @@ Previously-resolved items that **must stay fixed** — confirm none regressed:
 {{resolved_ledger}}
 </resolved_ledger>
 
+Author disputes to rule on (uphold or concede each in `dispute_rulings`):
+<open_disputes untrusted="true">
+{{open_disputes}}
+</open_disputes>
+
+Already-accepted deviations — do NOT re-raise these:
+<accepted_deviations trust="spec">
+{{accepted_deviations}}
+</accepted_deviations>
+
 Review for: soundness of the approach, missing scope, unaddressed risks,
 unrealistic assumptions, wrong altitude (too much/too little detail for a
 high-level plan), and internal contradictions. Do **not** nitpick wording or
@@ -45,4 +55,7 @@ and a calibrated `confidence` (0–1):
   rather than patched — give a `reject_reason`.
 - List any prior-round issues you judge resolved in `addressed_previous`.
 - Confirm none of the resolved-ledger items regressed; list any that did in
-  `regressions` (a regression **forbids** APPROVE).
+  `regressions`, **each with `evidence`** (the excerpt — assertions without evidence
+  are discarded). A verified regression forbids APPROVE.
+- Rule on each author dispute in `dispute_rulings` (uphold or concede); never
+  re-raise an already-accepted deviation.

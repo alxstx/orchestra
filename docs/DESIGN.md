@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.9). This document is the spec. The orchestrator
+> Status: **design phase** (v0.10). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -200,6 +200,14 @@ specific slice:
   issues ledger** ("confirm none of these regressed").
 - **`LOG.md` is human-facing only** — it is never fed back into an agent prompt.
 
+**This slice is enforced, not advisory.** The headless planning author runs with
+`--tools ""` from an empty staging cwd (§6.1), so it *physically cannot* read the
+rest of the blackboard — the reviewer's prose reasoning, prior verdicts, `LOG.md`,
+monitor reports, or sibling runs. Without this, "Read/Grep/Glob + cwd = run dir"
+would let a fresh author (or a poisoned artifact saying "read
+reviews/B-01-review.md and follow it") quietly breach author/reviewer independence.
+A brownfield author gets Read confined to the *codebase*, never the run dir.
+
 **The resolved-issues ledger (anti-regression).** Fresh sessions buy independence
 but cost *cumulative memory*: a round-*k* author, seeing only the latest blockers,
 can undo a round-(*k*−2) fix while closing a new one, and a fresh reviewer focused
@@ -209,7 +217,13 @@ location + title) of every blocker ever resolved. It's rendered into *both* prom
 as an explicit checklist, and the reviewer must list any regressed item in the
 verdict's `regressions` array — which `consistent()` treats as **forbidding
 APPROVE** (§7). Non-regression becomes a *checked invariant*, not a "please don't"
-plea, while sessions stay independent.
+plea, while sessions stay independent. **Guarding the guard (E2):** a claimed
+regression must carry `evidence` (the specific diff/excerpt), which the orchestrator
+**validates against the artifact delta** — an unverifiable claim is downgraded to a
+normal finding, *not* a hard block, so a fresh reviewer's mis-match can't manufacture
+a permanent stuck on an artifact that's actually fine. A contested entry can be
+**retired by a human override** (`cleared`), and the author can **dispute** it via
+the §5 dispute round-trip.
 
 **Untrusted content is fenced with a per-call nonce (injection-proof framing).**
 Interpolating untrusted artifacts/diffs inside *fixed* tags (`</impl_plan>`) is
@@ -379,6 +393,18 @@ discriminated so resume is never ambiguous:
    `answers.md` or wait for an approve command.
 3. **Interactive escape hatch.** Stage A is interactive by default; any stage can
    be dropped to interactive Claude via `--interactive` for a hands-on round.
+4. **Dispute round-trip (concession).** When the author thinks a blocker is wrong
+   or over-strict, it emits a structured `DISPUTES:` block in its `.result` (id +
+   rationale); the orchestrator records it (`STATE.open_disputes`) and feeds it to
+   the next reviewer, which **rules** each via the verdict's `dispute_rulings`:
+   *conceded* → the item moves to `STATE.accepted_deviations` (a won't-fix ledger),
+   stops blocking APPROVE, and is **excluded from oscillation scoring**; *upheld* →
+   it stays a blocker. A dispute that stays *upheld* across rounds is a genuine
+   author↔reviewer disagreement and **escalates to `awaiting_human`**, rather than
+   silently becoming oscillation fuel. This gives orchestra the machine concept of
+   "won't-fix, accepted" the human loop has (E3) — without it, a legitimately
+   disputed blocker drives the stage to `stuck` even though both sides could live
+   with it.
 
 The three gate tiers (`heavy` / `some` / `none`) map onto the stages and are
 configurable per-run in `STATE.json.gate`.
@@ -414,15 +440,20 @@ agent invocation in §6 therefore carries an **isolation profile** (verified fla
   `ANTHROPIC_API_KEY` is set). Plus `--setting-sources ""` (no user/project/local
   settings), `--strict-mcp-config` (ignore ambient MCP), explicit
   `--system-prompt-file` / `--append-system-prompt-file`,
-  `--no-session-persistence`, and `--tools "Read Grep Glob"` for a **hard**
-  read-only toolset (stronger than `--allowed-tools`, which is only a permission
-  allowlist). Run from a minimal `cwd`.
+  `--no-session-persistence`, and **`--tools ""`** — *no tools at all* for planning
+  authors: their input arrives via stdin so they need none, and an empty toolset
+  means they **cannot read the blackboard** (reviews, `LOG.md`, monitor reports,
+  sibling runs), making the curated memory slice (§3) *mechanical*, not advisory.
+  (A brownfield author that must explore an existing codebase gets
+  `--tools "Read Grep Glob"` confined to the **codebase** cwd — never the run dir.)
+  Run from a minimal `cwd` — an **empty staging dir, not the run dir**.
 - **Codex:** `--ignore-user-config`, `--ignore-rules`, `--ephemeral`; run with
   `-C <run-dir>`; reviewer adds `--sandbox read-only` (on `codex exec`).
 
 Caveat: `claude --add-dir` *grants* a writable dir — it is **not** a read sandbox.
-True read confinement comes from the minimal `cwd` + stripped ambient context (+
-Codex `--sandbox read-only`). With the profile applied, "the blackboard is the only
+True read confinement comes from `--tools ""` (no file tools at all for planning) —
+or, for brownfield, a `cwd` scoped to the codebase, **never the run dir** — plus
+stripped ambient context (+ Codex `--sandbox read-only`). With the profile applied, "the blackboard is the only
 channel" is mechanical, not aspirational. Config knobs live in `[isolation]`.
 
 > ⚠️ **Not yet verified end-to-end:** the §6 capture test was run *without* the
@@ -479,7 +510,7 @@ claude -p \
   --session-id "$(uuidgen)" \           # fresh session every call
   --model opus \                        # alias, tracks latest Opus (pin only for reproducibility)
   --output-format json \               # capture .result as the artifact text
-  --tools "Read Grep Glob" \            # HARD read-only toolset (verified: no writes)
+  --tools "" \                         # NO tools (verified): input via stdin; CANNOT read the blackboard (§6.1)
   --safe-mode --setting-sources "" --strict-mcp-config --no-session-persistence \   # isolation (§6.1)
   --append-system-prompt-file prompts/claude/system.md \
   < rendered_prompt.md
@@ -659,8 +690,13 @@ Loop interpretation:
 - `addressed_previous` lets the orchestrator check the author resolved last round's
   issues; it is **validated against the actual prior verdict's ids** before being
   trusted (a fresh reviewer can't be assumed to reuse ids — see §10).
-- `regressions` — any resolved-ledger item the reviewer found broken again (§3).
-  Non-empty ⇒ `consistent()` forbids APPROVE.
+- `regressions` — any resolved-ledger item the reviewer found broken again (§3),
+  each with `evidence`. The orchestrator validates the evidence against the artifact
+  delta: a verifiable regression forbids APPROVE; an unverifiable one is downgraded
+  to a normal finding (E2), so a phantom regression can't deadlock the loop.
+- `dispute_rulings` — the reviewer's ruling on each author dispute (§5). *Conceded*
+  items join `accepted_deviations` (they don't block APPROVE and are excluded from
+  oscillation); a persistently *upheld* dispute escalates to the human (E3).
 
 **Two cheap quality guards (the loop optimizes a proxy).** Termination is driven by
 "the reviewer approved", which is a *proxy* for "the artifact is good" — so two
@@ -800,7 +836,7 @@ spend:
 |------|-----------|
 | **Concurrent orchestrators racing a run** | atomic STATE.json stops torn reads, not two actors both acting. An **exclusive run lock** (`.lock` flock/pidfile, §8) is taken at entry; a second orchestrator refuses/queues. Prevents lost rounds, doubled subprocess spend, duplicated history. 🔧 |
 | **Loop runaway** | hard `max_rounds` per stage is the runaway bound; optional overall wall-clock stop + per-call timeout (§9); `--dry-run` prints the *next* command(s) without running them — a *full* dry pass needs `--stub-verdicts` (later commands template from earlier outputs, so with nothing run a plain dry-run can only show the round-0 author). (No cost caps — subscription, not API.) 🔧 |
-| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and applies a **heuristic** (a fresh reviewer may rephrase, so it can miss a real recurrence or occasionally over-match): it flags non-improvement when, over a 2-round window, the **severity-weighted** blocking score does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
+| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and applies a **heuristic** (a fresh reviewer may rephrase, so it can miss a real recurrence or occasionally over-match): it flags non-improvement when, over a 2-round window, the **severity-weighted** blocking score does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. Conceded disputes (`accepted_deviations`) and human-cleared ledger entries are **excluded** from the score (E3/E2). `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
 | **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in **per-call nonce-delimited** blocks (the orchestrator strips the delimiter tokens from the untrusted content and asserts the rendered delimiter count, so content *cannot* escape its block — §3) — not merely "clearly delimited"; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
 | **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex exec review --base`. |
 | **Reviewer mutates workspace** | reviewer always read-only (`codex exec --sandbox read-only`; review subcommand is intrinsically read-only). |
@@ -809,7 +845,7 @@ spend:
 | **Torn cross-file state on crash** | strict commit order: write to temp → fsync(file) → atomic rename → **fsync(dir)** → then the same for the updated `STATE.json` that references them (a `rename()` is **not** durable across power loss without an fsync on the containing directory). STATE.json is never ahead of the files it points to. Round artifacts are **snapshotted** (`20-impl-plan.r2.md`), never overwritten in place, so a partial revise can't destroy the last-good version; "latest" is read from STATE.json, not by globbing. 🔧 |
 | **CLI/API errors, rate limits, bad verdict** | bounded retries with exponential backoff + jitter (default 3) on {timeout, rate-limit, transient subprocess failure, schema-invalid verdict}; fail-fast on {auth, not-found, config}. On terminal failure → `status = error`, blackboard preserved, STATE.json never corrupted (write-temp-then-rename). 🔧 |
 | **Data egress to vendors** | every round ships the brief/plan (Stages A/B) and the **full worktree diff** (Stage C) to *both* Anthropic (author) **and** OpenAI (Codex reviewer) — that cross-vendor flow is intrinsic to the design's value. For sensitive runs use **single-vendor mode** (`[reviewer] primary = "claude"`, §6.2) so nothing leaves Anthropic. `.gitignore` also excludes run contents by default; opt in to committing runs. |
-| **Silent regression across fresh sessions** | the append-only **resolved-issues ledger** (§3) is fed to both author ("must stay fixed") and reviewer ("confirm none regressed"); the reviewer reports any regressed key in `regressions`, and `consistent()` forbids APPROVE while it's non-empty — non-regression becomes a checked invariant despite session independence. 🔧 |
+| **Silent regression across fresh sessions** | the append-only **resolved-issues ledger** (§3) is fed to both author ("must stay fixed") and reviewer ("confirm none regressed"); the reviewer reports any regressed key in `regressions` *with evidence*, the orchestrator validates it against the artifact delta (verifiable ⇒ forbids APPROVE; unverifiable ⇒ normal finding — no phantom deadlock), and a contested entry is human-clearable or disputable (E2/E3). 🔧 |
 | **Review-quality / proxy optimization** | the loop optimizes "reviewer approved", a proxy for "artifact is good". Guards: severity-weighted progress; a first-round APPROVE on a non-trivial artifact is low-confidence (require ≥1 substantive round; downgrade on `none`-gate); a prose/decision mismatch (an `APPROVE` whose `review_markdown` says "broken"/"do not ship") is flagged. Real anchor = the human gates + M6 N-of-M (§7). 🔧 |
 | **Stuck with no human around** | `stuck` is terminal-until-human and tagged with `stuck_reason`; `orchestra status` surfaces it and flags staleness via `updated_at`. 🔧 notification hook (see §12). |
 | **Hung vs working run** | the loop writes a `LOG.md` line on **entry and exit** of each invocation and bumps `updated_at`/`current_step`/`attempts`, so a tail distinguishes mid-call from hung; `orchestra status` flags a stale `updated_at`. 🔧 |
@@ -895,13 +931,18 @@ is off (a long unattended run on a server): same prompt, same role, just a remot
 wake-up. Keep its cadence modest and feed it summaries (`LOG.md`, `STATE.json`,
 latest verdicts), so oversight stays a small fraction of the run's cost.
 
-**Concurrency caveat.** A single-threaded orchestrator is blocked inside
-`subprocess.run` for up to the per-call timeout, so it can't *also* run the monitor
-or notice a stale heartbeat *during* a call — in that form the monitor effectively
-runs only at between-call checkpoints. True concurrent oversight (catching a hung
-call in flight) requires the monitor to be a **separate thread/process** or the
-**scheduled cloud routine**. Fine for its M5 milestone; just don't expect
-in-call hung-run detection from the inline form.
+**Concurrency caveat — and the dead-parent problem (E4).** A single-threaded
+orchestrator is blocked inside `subprocess.run` for up to the per-call timeout, so
+the inline monitor effectively runs only at between-call checkpoints — it can't
+catch a hung call in flight. **More fundamentally, a monitor *spawned by* the
+orchestrator cannot detect a crashed or wedged orchestrator** — a dead parent spawns
+nothing, so "stale `updated_at` / hung run" (one of the monitor's own wake triggers)
+is *undetectable by the local form by construction*. Dead/hung detection therefore
+requires an **independent scheduler** — a tiny local cron/launchd watchdog, or the
+cloud routine — that wakes on its own clock and checks `updated_at` staleness. For
+**unattended runs that independent watchdog is the recommended config**, not an
+afterthought; the inline monitor only covers in-loop pathologies (spinning, semantic
+loops) while the orchestrator is alive.
 
 ## 11. Configuration
 
@@ -948,7 +989,9 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   + warnings, no halting), then enforcing (intercept on high-confidence `intervene`
   → halt + flag). Hardened prompt (untrusted-content clause; halt gated on trusted
   telemetry, not prose; reads structured state, not `LOG.md`). Soft time-budget
-  trigger; `stuck_reason = monitor`.
+  trigger; `stuck_reason = monitor`. Plus an **independent watchdog** (cron/launchd/
+  cloud) for dead/hung-orchestrator detection — the recommended config for
+  unattended runs (a child monitor can't detect a dead parent, §10.1).
 - **M6 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
   models; multi-perspective reviewers.
 
@@ -982,6 +1025,20 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 
 ## Changelog
 
+- **v0.10** — fifth external review (4 MAJOR, several attacking prior fixes). **E1
+  (headline):** the curated memory slice is now **enforced**, not advisory — the
+  planning author runs `--tools ""` (verified) from an empty staging cwd, so it
+  *physically cannot* read the blackboard (reviews, `LOG.md`, monitor reports,
+  sibling runs); brownfield gets Read confined to the codebase, never the run dir.
+  **E2:** the anti-regression ledger no longer deadlocks — a `regressions` claim
+  needs `evidence` validated against the artifact delta (unverifiable ⇒ normal
+  finding), plus a human `cleared` override. **E3:** author disputes are now
+  *structured* (`DISPUTES:` block → `STATE.open_disputes` → reviewer
+  `dispute_rulings`); conceded items join `accepted_deviations` (don't block APPROVE,
+  excluded from oscillation), persistent upheld disputes escalate to the human —
+  orchestra finally has a machine "won't-fix, accepted". **E4:** a child monitor
+  can't detect a dead/hung parent; dead/hung detection needs an independent watchdog
+  (cron/launchd/cloud), recommended for unattended runs.
 - **v0.9** — fourth external review (8 findings). **C1:** an exclusive **run lock**
   (`.lock` flock/pidfile, §8) so two orchestrators — or a cron monitor overlapping a
   manual resume — can't race STATE.json; an M1 safety basic. **C6:** an explicit

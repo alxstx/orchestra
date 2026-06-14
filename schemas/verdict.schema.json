@@ -5,7 +5,7 @@
   "description": "The machine-readable verdict Codex emits as its final message each review round (via --output-schema, written by -o/--output-last-message). IMPORTANT: this schema is consumed by `codex exec --output-schema`, whose backend (OpenAI structured outputs, STRICT mode) FORBIDS allOf/if-then/oneOf and requires EVERY property in `required`, with optionals expressed as nullable. So this schema constrains SHAPE ONLY. The semantic invariants (APPROVE<=>no blockers, REVISE>=1 blocker, REJECT justified) are enforced by the orchestrator's consistent(verdict) check (DESIGN §4/§7) — that is the only enforcement; the schema cannot express it. There is no separate prose channel: the human-readable review is review_markdown (stdout under --output-schema/--json is JSON, not prose).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions", "reject_reason", "addressed_previous", "regressions"],
+  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions", "reject_reason", "addressed_previous", "regressions", "dispute_rulings"],
   "properties": {
     "decision": {
       "type": "string",
@@ -70,10 +70,25 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["key", "detail"],
+        "required": ["key", "detail", "evidence"],
         "properties": {
           "key": { "type": "string", "description": "The resolved-ledger content key that regressed." },
-          "detail": { "type": "string" }
+          "detail": { "type": "string" },
+          "evidence": { "type": "string", "description": "The specific diff/excerpt showing the regression (E2) — not just an assertion. The orchestrator validates this against the artifact delta; an unverifiable claim is downgraded to a normal finding, NOT a hard APPROVE-block." }
+        }
+      }
+    },
+    "dispute_rulings": {
+      "type": "array",
+      "description": "For each author dispute carried into this review (DESIGN §5): the reviewer's ruling. [] if no open disputes. A 'conceded' ruling moves the item to STATE.accepted_deviations — it no longer blocks APPROVE and is excluded from oscillation scoring (E3). Persistent 'upheld' across rounds escalates to the human.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "ruling", "note"],
+        "properties": {
+          "ref": { "type": "string", "description": "The disputed item's id / content key." },
+          "ruling": { "type": "string", "enum": ["upheld", "conceded"] },
+          "note": { "type": "string" }
         }
       }
     }

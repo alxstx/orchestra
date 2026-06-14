@@ -129,13 +129,15 @@ def resume(run_dir: Path) -> str:
 
 def consistent(verdict: dict, ledger: list) -> bool:
     """Enforce the verdict invariants the strict schema can't (DESIGN §7):
-    APPROVE <=> blocking_issues empty AND regressions empty; REVISE <=> >=1 blocker;
-    REJECT <=> >=1 blocker or reject_reason. A confidence outside [0,1] is a
-    failure (re-prompt once), NOT a silent clamp. Plus the quality guards: a
-    first-round APPROVE on a non-trivial artifact, and a prose/decision mismatch
-    (review_markdown carries strong negative markers like "broken"/"do not ship"),
-    downgrade to awaiting_human rather than converging. Progress is scored
-    severity-weighted.
+    APPROVE <=> blocking_issues empty AND no VALIDATED regression; REVISE <=> >=1
+    blocker; REJECT <=> >=1 blocker or reject_reason. A confidence outside [0,1] is
+    a failure (re-prompt once), NOT a silent clamp. Regression claims need evidence
+    validated against the artifact delta (unverifiable -> normal finding, not a
+    deadlock); conceded disputes (accepted_deviations) don't block APPROVE and are
+    excluded from oscillation. Plus the quality guards: a first-round APPROVE on a
+    non-trivial artifact, and a prose/decision mismatch (review_markdown carries
+    strong negative markers like "broken"/"do not ship"), downgrade to
+    awaiting_human. Progress is scored severity-weighted.
     """
     raise NotImplementedError("M1")
 
@@ -172,7 +174,8 @@ def cmd_approve(args: argparse.Namespace) -> None:
 
 
 def cmd_iterate(args: argparse.Namespace) -> None:
-    """Force another round, optionally with a human --note."""
+    """Force another round, optionally with a human --note. Also the human override
+    path to clear a contested resolved_ledger entry (E2) or accept a deviation."""
     raise NotImplementedError("M2")
 
 
