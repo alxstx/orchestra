@@ -43,8 +43,11 @@ def save_state(run_dir: Path, state: dict) -> None:
 def render_prompt(template: str, **ctx: str) -> str:
     """Render a prompts/ template, substituting {{placeholders}} from ctx.
 
-    Artifacts are interpolated as DATA inside delimited blocks; never trust their
-    contents as instructions (see DESIGN §10, prompt-injection safeguard).
+    Untrusted values (artifacts, diffs, reviewer feedback, the resolved-issues
+    ledger) are wrapped in a PER-CALL NONCE delimiter: the nonce/delimiter tokens
+    are stripped/escaped from the value first, and the rendered prompt is asserted
+    to contain exactly the expected delimiter count — so untrusted content cannot
+    escape its block, independent of model version (DESIGN §3/§10).
     """
     raise NotImplementedError("M1")
 
@@ -110,6 +113,17 @@ def resume(run_dir: Path) -> str:
     awaiting_human->await(waiting_for), converged->advance_stage,
     stuck/error/done->terminal. The orchestrator is a pure function of the
     blackboard; every status carries the fields resume needs (state.schema allOf).
+    """
+    raise NotImplementedError("M1")
+
+
+def consistent(verdict: dict, ledger: list) -> bool:
+    """Enforce the verdict invariants the strict schema can't (DESIGN §7):
+    APPROVE <=> blocking_issues empty AND regressions empty; REVISE <=> >=1 blocker;
+    REJECT <=> >=1 blocker or reject_reason. Plus the quality guards: a first-round
+    APPROVE on a non-trivial artifact, and a prose/decision mismatch (review_markdown
+    carries strong negative markers like "broken"/"do not ship"), downgrade to
+    awaiting_human rather than converging. Progress is scored severity-weighted.
     """
     raise NotImplementedError("M1")
 

@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.7). This document is the spec. The orchestrator
+> Status: **design phase** (v0.8). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -43,7 +43,11 @@ state, no conversation memory leaking between author and reviewer — just files
    Fresh sessions alone don't guarantee this — both CLIs can still load ambient
    user/project config, hooks, rules, and MCP servers. The **isolation profile**
    (§6.1) strips that ambient context so the blackboard is *mechanically* the only
-   channel, not just by convention.
+   channel, not just by convention. Caveat: the pipeline is **resumable and
+   auditable, not bit-reproducible** — LLMs are nondeterministic and the model
+   aliases track latest, so re-running a blackboard yields different artifacts (and
+   possibly a different model). `history` records the resolved model id/version per
+   call so the audit trail survives alias drift.
 3. **Machine-readable verdicts make the loop self-terminating.** Codex emits a
    JSON verdict against a fixed schema (`schemas/verdict.schema.json`) *in
    addition* to its prose review. Without it, "automatic back-and-forth" never
@@ -135,10 +139,11 @@ code is written, and may interject between rounds.
 
 1. Fresh headless Claude, in **edit mode** inside an isolated git worktree
    (`30-impl/`), implements against the approved `20-impl-plan.md`.
-2. 🔧 The orchestrator runs an **operator-provided test command** (from run config /
-   the brief — *not* parsed from the model's plan, which would be an LLM-authored
-   command executed outside the author's sandbox) in the worktree, under a timeout
-   and least privilege, capturing exit code + output. That result is fed into the
+2. 🔧 The orchestrator runs an **operator-provided test command** (from
+   `[stage_c].test_command` config **only** — *not* parsed from the model's plan
+   *or* the free-text brief, either of which would mean executing a command lifted
+   from markdown) in the worktree, under a timeout and least privilege, capturing
+   exit code + output. That result is fed into the
    review prompt as a *trusted, orchestrator-produced* field — so "tests pass" is a
    real, executed gate, not the author's self-claim (see §6, §10).
 3. `codex exec review --base <branch>` reviews the actual diff → verdict JSON.
@@ -187,10 +192,35 @@ fresh sessions exist to avoid. Each round, the **memory handed to an agent** is 
 specific slice:
 
 - **Author (revise):** brief + approved upstream plan + the *current* artifact +
-  the *latest* verdict's blocking issues (+ any human review note).
+  the *latest* verdict's blocking issues + the **resolved-issues ledger** ("fixed
+  in earlier rounds — must stay fixed") (+ any human review note).
 - **Reviewer:** brief + approved upstream plan + the artifact under review + a
-  short digest of still-open prior issues (`{{prior_issues}}`).
+  short digest of still-open prior issues (`{{prior_issues}}`) + the **resolved-
+  issues ledger** ("confirm none of these regressed").
 - **`LOG.md` is human-facing only** — it is never fed back into an agent prompt.
+
+**The resolved-issues ledger (anti-regression).** Fresh sessions buy independence
+but cost *cumulative memory*: a round-*k* author, seeing only the latest blockers,
+can undo a round-(*k*−2) fix while closing a new one, and a fresh reviewer focused
+elsewhere may not re-flag it → the regression ships. So the orchestrator keeps an
+**append-only ledger** (`STATE.resolved_ledger`) of the content key (normalized
+location + title) of every blocker ever resolved. It's rendered into *both* prompts
+as an explicit checklist, and the reviewer must list any regressed item in the
+verdict's `regressions` array — which `consistent()` treats as **forbidding
+APPROVE** (§7). Non-regression becomes a *checked invariant*, not a "please don't"
+plea, while sessions stay independent.
+
+**Untrusted content is fenced with a per-call nonce (injection-proof framing).**
+Interpolating untrusted artifacts/diffs inside *fixed* tags (`</impl_plan>`) is
+escapable — untrusted text containing that token breaks out of the block, a real
+threat in Stage C where a diff carries attacker-influenceable strings and the
+author runs in `acceptEdits`. So `render_prompt` wraps each untrusted block in a
+**per-call random nonce** (`<untrusted nonce="a8f3…">…</untrusted nonce="a8f3…">`),
+**strips/escapes** any occurrence of the delimiter tokens from the untrusted
+content first, and **asserts** the rendered prompt contains exactly the expected
+number of delimiters before sending. That turns "the model usually notices the
+injection" into "the content cannot escape its block" — independent of which model
+(or model version) is behind the alias.
 
 The handoff is sequential, not concurrent: the orchestrator detects "artifact
 written and persisted" (author invocation returned + the file committed per §10),
@@ -319,10 +349,12 @@ discriminated so resume is never ambiguous:
    see "idle model" below). You resume with `orchestra approve <run>` /
    `orchestra iterate <run> --note "..."`.
 2. **Question round-trip** (Stage A, or any headless author that's unsure). The
-   author writes `questions.md`; orchestrator sets `status = awaiting_human,
-   waiting_for = answers`; you fill in `answers.md`; the next author invocation
-   gets both appended. On resume, `waiting_for` tells the orchestrator whether to
-   look for `answers.md` or wait for an approve command.
+   headless author is read-only (§6.1) and **cannot write files**, so it emits a
+   fenced `QUESTIONS:` block in its `.result`; the **orchestrator** parses that and
+   writes `questions.md`, then sets `status = awaiting_human, waiting_for =
+   answers`. You fill in `answers.md`; the next author invocation gets both
+   appended. On resume, `waiting_for` tells the orchestrator whether to look for
+   `answers.md` or wait for an approve command.
 3. **Interactive escape hatch.** Stage A is interactive by default; any stage can
    be dropped to interactive Claude via `--interactive` for a hands-on round.
 
@@ -349,7 +381,8 @@ retried or escalated (§9, §10).
 Fresh `--session-id` / `codex exec` only stops *conversation* carryover. Both CLIs
 otherwise load ambient context — global/project `CLAUDE.md`, settings, hooks,
 plugins, MCP servers (Claude); `~/.codex/config.toml`, rules (Codex) — which would
-leak state the blackboard is supposed to own, and make runs non-reproducible. Every
+leak state the blackboard is supposed to own, and make behaviour depend on the
+operator's machine. Every
 agent invocation in §6 therefore carries an **isolation profile** (verified flags,
 `claude 2.1.177` / `codex-cli 0.139.0`):
 
@@ -408,6 +441,14 @@ same model family as the author, so shared blind spots are likelier. Fallback is
 **degraded mode**, surfaced not silent: it keeps you moving through a Codex limit;
 prefer re-running affected rounds under Codex once it resets for anything
 high-stakes.
+
+**Single-vendor mode (data egress).** Cross-vendor review means every round ships
+the brief/plan (Stages A/B) and the **full worktree diff** (Stage C) to *both*
+Anthropic (the author) **and** OpenAI (the Codex reviewer) — see the §10 egress
+row. For sensitive work set `[reviewer] primary = "claude"`: the reviewer becomes a
+fresh, isolated Claude session, so nothing leaves Anthropic. That's the fallback
+path promoted to a deliberate default — you trade cross-model independence for **zero
+cross-vendor egress**. State it as a conscious choice per run.
 
 ### Claude — author, planning stages (read-only; orchestrator owns the file)
 
@@ -499,6 +540,15 @@ codex exec review - \                              # `review` SUBCOMMAND of exec
 > Use `--uncommitted` (or commit-then-`--commit`) because Claude leaves an
 > *uncommitted* worktree diff that `--base` alone can miss (untracked/unstaged).
 
+**Greenfield vs brownfield base.** `--base <branch>` and the worktree assume an
+existing repo — but the pipeline reads *greenfield* (brief → plan → build), and the
+shipped example is a from-scratch app. So the orchestrator bootstraps per run: for
+**greenfield**, `git init` the `30-impl/` worktree with an **empty initial commit**
+as the base, and commit each round (the §8 resume-reset already requires per-round
+commits); review diffs against the prior round's commit (`--commit <sha>`) or the
+empty base (round 1 = everything-vs-nothing). For **brownfield**, the existing repo
+and its main branch are the base. The run config records which.
+
 ### Why these flags
 
 - `--session-id "$(uuidgen)"` — deterministic *fresh* sessions; independence.
@@ -541,7 +591,8 @@ constrain *shape* — it lists all fields (`confidence`, `review_markdown`,
 `reject_reason`, `location`, …) and types. The semantic invariants are enforced by
 the orchestrator's `consistent(verdict)` check: `APPROVE` ⟺ `blocking_issues`
 empty; `REVISE` ⟺ ≥1 blocking issue; `REJECT` ⟺ (≥1 blocking issue **or** a
-`reject_reason`). The human-readable review lives in `review_markdown` (no
+`reject_reason`); and an `APPROVE` additionally requires the `regressions` array
+empty (§3 anti-regression). The human-readable review lives in `review_markdown` (no
 prose-on-stdout — §6). Any verdict that fails the schema, is unparseable, or fails
 `consistent()` is an **error to re-prompt once, then escalate** (`stuck_reason =
 error`) — never CONVERGED.
@@ -576,6 +627,21 @@ Loop interpretation:
 - `addressed_previous` lets the orchestrator check the author resolved last round's
   issues; it is **validated against the actual prior verdict's ids** before being
   trusted (a fresh reviewer can't be assumed to reuse ids — see §10).
+- `regressions` — any resolved-ledger item the reviewer found broken again (§3).
+  Non-empty ⇒ `consistent()` forbids APPROVE.
+
+**Two cheap quality guards (the loop optimizes a proxy).** Termination is driven by
+"the reviewer approved", which is a *proxy* for "the artifact is good" — so two
+pathologies get explicit guards. (1) A **first-round APPROVE on a non-trivial
+artifact** is treated as low-confidence: on a `none`-gate stage it downgrades to
+`awaiting_human`, and the loop requires **≥1 substantive review round** before
+auto-advancing (a too-easy pass is as suspicious as endless churn). (2) A
+**prose/decision mismatch** — an `APPROVE` whose `review_markdown` carries strong
+negative markers ("broken", "must fix", "do not ship") — is flagged for human
+review. And **progress is measured severity-weighted**, not by raw blocker count,
+because a reviewer can shed mediums while the artifact gets worse (§10). These are
+mitigations, not cures: the real anchor to ground truth is the human gates and,
+later, M6 N-of-M reviewer voting.
 
 ## 8. State machine
 
@@ -684,15 +750,17 @@ spend:
 | Risk | Safeguard |
 |------|-----------|
 | **Loop runaway** | hard `max_rounds` per stage is the runaway bound; optional overall wall-clock stop + per-call timeout (§9); `--dry-run` prints commands without running them. (No cost caps — subscription, not API.) 🔧 |
-| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and applies a **heuristic** (a fresh reviewer may rephrase, so it can miss a real recurrence or occasionally over-match): it flags non-improvement when, over a 2-round window, the blocking-issue count does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
-| **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in clearly delimited blocks; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
+| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and applies a **heuristic** (a fresh reviewer may rephrase, so it can miss a real recurrence or occasionally over-match): it flags non-improvement when, over a 2-round window, the **severity-weighted** blocking score does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
+| **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in **per-call nonce-delimited** blocks (the orchestrator strips the delimiter tokens from the untrusted content and asserts the rendered delimiter count, so content *cannot* escape its block — §3) — not merely "clearly delimited"; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
 | **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex exec review --base`. |
 | **Reviewer mutates workspace** | reviewer always read-only (`codex exec --sandbox read-only`; review subcommand is intrinsically read-only). |
-| **"Tests pass" is self-attested** | 🔧 the **orchestrator** runs an *operator-provided* test command (run config / brief — **never** extracted from the model's plan, which would be an LLM-authored command run outside the author's sandbox) in the worktree under a timeout + least privilege, and feeds exit code + output into the review prompt as a trusted field. Green tests are an *executed* gate, not a prose claim. |
+| **"Tests pass" is self-attested** | 🔧 the **orchestrator** runs an *operator-provided* test command (`[stage_c].test_command` config **only** — **never** parsed from the model's plan or the free-text brief) in the worktree under a timeout + least privilege, and feeds exit code + output into the review prompt as a trusted field. Green tests are an *executed* gate, not a prose claim. |
 | **Self-contradictory verdict** | schema enforces APPROVE⟺no-blockers; inconsistent/invalid/unparseable verdict → re-prompt once → `stuck(error)`; never CONVERGED (§7). |
-| **Torn cross-file state on crash** | strict commit order: write artifact/verdict to temp → fsync → atomic rename into place → **then** atomic-rename the updated `STATE.json` that references them. STATE.json is never ahead of the files it points to. Round artifacts are **snapshotted** (`20-impl-plan.r2.md`), never overwritten in place, so a partial revise can't destroy the last-good version; "latest" is read from STATE.json, not by globbing. 🔧 |
+| **Torn cross-file state on crash** | strict commit order: write to temp → fsync(file) → atomic rename → **fsync(dir)** → then the same for the updated `STATE.json` that references them (a `rename()` is **not** durable across power loss without an fsync on the containing directory). STATE.json is never ahead of the files it points to. Round artifacts are **snapshotted** (`20-impl-plan.r2.md`), never overwritten in place, so a partial revise can't destroy the last-good version; "latest" is read from STATE.json, not by globbing. 🔧 |
 | **CLI/API errors, rate limits, bad verdict** | bounded retries with exponential backoff + jitter (default 3) on {timeout, rate-limit, transient subprocess failure, schema-invalid verdict}; fail-fast on {auth, not-found, config}. On terminal failure → `status = error`, blackboard preserved, STATE.json never corrupted (write-temp-then-rename). 🔧 |
-| **Secrets leakage** | `.gitignore` excludes run contents by default; briefs/plans may be sensitive — opt in to committing runs. |
+| **Data egress to vendors** | every round ships the brief/plan (Stages A/B) and the **full worktree diff** (Stage C) to *both* Anthropic (author) **and** OpenAI (Codex reviewer) — that cross-vendor flow is intrinsic to the design's value. For sensitive runs use **single-vendor mode** (`[reviewer] primary = "claude"`, §6.2) so nothing leaves Anthropic. `.gitignore` also excludes run contents by default; opt in to committing runs. |
+| **Silent regression across fresh sessions** | the append-only **resolved-issues ledger** (§3) is fed to both author ("must stay fixed") and reviewer ("confirm none regressed"); the reviewer reports any regressed key in `regressions`, and `consistent()` forbids APPROVE while it's non-empty — non-regression becomes a checked invariant despite session independence. 🔧 |
+| **Review-quality / proxy optimization** | the loop optimizes "reviewer approved", a proxy for "artifact is good". Guards: severity-weighted progress; a first-round APPROVE on a non-trivial artifact is low-confidence (require ≥1 substantive round; downgrade on `none`-gate); a prose/decision mismatch (an `APPROVE` whose `review_markdown` says "broken"/"do not ship") is flagged. Real anchor = the human gates + M6 N-of-M (§7). 🔧 |
 | **Stuck with no human around** | `stuck` is terminal-until-human and tagged with `stuck_reason`; `orchestra status` surfaces it and flags staleness via `updated_at`. 🔧 notification hook (see §12). |
 | **Hung vs working run** | the loop writes a `LOG.md` line on **entry and exit** of each invocation and bumps `updated_at`/`current_step`/`attempts`, so a tail distinguishes mid-call from hung; `orchestra status` flags a stale `updated_at`. 🔧 |
 | **Subtle/semantic failure the static guards miss** | an optional concurrent **monitor** (§10.1) judges run *health* — real progress vs spinning, recurring errors, semantic loops, rounds/time-vs-progress — and, in enforcing mode, can halt and flag you *earlier* than the hard caps, or judge an over-run benign and let it continue. Augments the mechanical floor; never replaces it. 🔧 |
@@ -849,6 +917,22 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 
 ## Changelog
 
+- **v0.8** — third external review (10 findings, incl. conceptual/governance/
+  security). **A1 anti-regression:** an append-only resolved-issues ledger
+  (`STATE.resolved_ledger`) is fed to both author and reviewer; the reviewer reports
+  any regressed key in the verdict's new `regressions` array, and `consistent()`
+  forbids APPROVE while it's non-empty — non-regression is now a *checked* invariant
+  despite fresh-session independence (§3/§7). **A4 injection:** untrusted blocks use
+  a per-call **nonce** delimiter with token-stripping + a delimiter-count assertion
+  ("cannot escape", not "usually noticed"). **A3 governance:** documented per-round
+  data egress to *both* vendors and added **single-vendor mode**
+  (`[reviewer] primary = "claude"`). **A2 calibration:** severity-weighted progress,
+  a suspicious-easy-pass guard (≥1 substantive round before none-gate auto-advance),
+  a prose/decision-mismatch flag, and an author *dispute* path for wrong blockers.
+  **A5:** read-only author emits a `QUESTIONS:` block in `.result` (it can't Write).
+  **A6:** greenfield Stage C bootstrap (`git init` + empty base commit). Minors:
+  directory fsync for crash-safety (A9), "auditable not reproducible" + per-call
+  model recorded in history (A8), test command config-only (A10).
 - **v0.7** — second external review (14 findings; CLI re-verified + 3 live `codex
   exec` calls) plus two user directives. **F1 (critical):** the verdict schema's
   `allOf`/`if-then` is rejected by `codex --output-schema` (OpenAI strict mode) and

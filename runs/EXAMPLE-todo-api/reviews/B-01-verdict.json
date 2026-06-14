@@ -25,5 +25,6 @@
     { "id": "N1", "title": "Consider pagination", "detail": "List endpoint may grow; note it as a future concern." }
   ],
   "reject_reason": null,
-  "addressed_previous": []
+  "addressed_previous": [],
+  "regressions": []
 }

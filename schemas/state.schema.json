@@ -121,6 +121,20 @@
       "description": "The most recent verdict object (see verdict.schema.json), or null. Required (non-null) when status == deciding.",
       "type": ["object", "null"]
     },
+    "resolved_ledger": {
+      "type": "array",
+      "description": "Append-only anti-regression ledger (DESIGN §3): content keys of every blocker resolved in a prior round. Fed to BOTH the revise author ('must stay fixed') and the reviewer ('confirm none regressed'), so a fresh session can't silently undo a past fix.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "title", "resolved_round"],
+        "properties": {
+          "key": { "type": "string", "description": "Stable content key (normalized location + title)." },
+          "title": { "type": "string" },
+          "resolved_round": { "type": "integer" }
+        }
+      }
+    },
     "history": {
       "type": "array",
       "description": "Append-only event log; resume derives the current round from it.",
@@ -134,6 +148,7 @@
           "actor": { "type": "string", "enum": ["claude", "codex", "human", "orchestrator"] },
           "verdict": { "type": "string" },
           "fallback": { "type": "boolean", "description": "True if this review used the Claude reviewer fallback (Codex unavailable), §6.2." },
+          "model": { "type": "string", "description": "Resolved model id/version for this call (e.g. claude-opus-4-8), recorded for the audit trail since aliases track latest (DESIGN §1)." },
           "artifact": { "type": "string", "description": "Path to the round's artifact snapshot." },
           "artifact_hash": { "type": "string" },
           "note": { "type": "string" },

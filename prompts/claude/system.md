@@ -25,5 +25,10 @@ Operating rules:
 - When revising, address **every** blocking issue by id and say briefly how you
   addressed each. Do not silently drop one. Do not regress conformance to the
   brief / upstream plan while closing a blocker.
+- You'll be given a **resolved-issues ledger** — concerns fixed in earlier rounds.
+  They **must stay fixed**: never reintroduce one while addressing a new blocker.
+- If a blocking issue seems **wrong or over-strict**, you may **dispute** it:
+  address the underlying concern minimally and explain the disagreement in your
+  revision notes, rather than degrading the artifact to satisfy a mistaken critique.
 - Do not pad. A shorter plan that a reader can execute beats a longer one they
   can't.

@@ -17,6 +17,8 @@ author = "opus"
 primary = "codex"
 fallback = "claude"
 on_limit = "fallback"            # "fallback" = auto-switch (flagged) | "pause" = stop at awaiting_human
+# SINGLE-VENDOR MODE (data egress, §6.2/§10): for sensitive runs set primary = "claude"
+# so nothing leaves Anthropic — trades cross-model independence for zero cross-vendor egress.
 
 [max_rounds]
 # Hard ceiling on review rounds per stage (DESIGN §4.1). If a stage hasn't settled
@@ -54,7 +56,8 @@ reviewer = "read-only"
 
 # Strip ambient context so the blackboard is the ONLY channel (DESIGN §6.1).
 # Fresh sessions stop conversation carryover; these stop config/hooks/MCP/rules
-# leakage and make runs reproducible.
+# leakage and make behaviour independent of the operator's machine (NOT bit-
+# reproducible — LLMs are nondeterministic; DESIGN §1).
 [isolation]
 claude_safe_mode = true          # --safe-mode: disable CLAUDE.md/skills/hooks/plugins/MCP, KEEP auth
 claude_bare = false              # --bare ALSO disables keychain reads -> OAuth/subscription auth FAILS;

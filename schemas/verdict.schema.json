@@ -5,7 +5,7 @@
   "description": "The machine-readable verdict Codex emits as its final message each review round (via --output-schema, written by -o/--output-last-message). IMPORTANT: this schema is consumed by `codex exec --output-schema`, whose backend (OpenAI structured outputs, STRICT mode) FORBIDS allOf/if-then/oneOf and requires EVERY property in `required`, with optionals expressed as nullable. So this schema constrains SHAPE ONLY. The semantic invariants (APPROVE<=>no blockers, REVISE>=1 blocker, REJECT justified) are enforced by the orchestrator's consistent(verdict) check (DESIGN §4/§7) — that is the only enforcement; the schema cannot express it. There is no separate prose channel: the human-readable review is review_markdown (stdout under --output-schema/--json is JSON, not prose).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions", "reject_reason", "addressed_previous"],
+  "required": ["decision", "confidence", "review_markdown", "summary", "blocking_issues", "non_blocking_suggestions", "reject_reason", "addressed_previous", "regressions"],
   "properties": {
     "decision": {
       "type": "string",
@@ -63,6 +63,19 @@
       "type": "array",
       "description": "IDs of prior-round blocking issues the reviewer judges resolved this round; [] if none. Advisory: validated by the orchestrator against the actual prior verdict's ids before being trusted.",
       "items": { "type": "string" }
+    },
+    "regressions": {
+      "type": "array",
+      "description": "Resolved-ledger items (DESIGN §3) the reviewer finds REGRESSED this round — previously-fixed blockers now broken again. [] if none. The orchestrator forbids APPROVE when this is non-empty (consistent()). The ledger of 'must stay fixed' keys is supplied to the reviewer in its prompt.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "detail"],
+        "properties": {
+          "key": { "type": "string", "description": "The resolved-ledger content key that regressed." },
+          "detail": { "type": "string" }
+        }
+      }
     }
   }
 }

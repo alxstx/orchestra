@@ -31,10 +31,17 @@ Reviewer **blocking issues** — every one must be resolved:
 {{blocking_issues}}
 </blocking_issues>
 
+Previously resolved — **must stay fixed** (do not reintroduce any of these):
+<resolved_ledger untrusted="true">
+{{resolved_ledger}}
+</resolved_ledger>
+
 Revise the {{artifact_label}} to address all blocking issues without drifting from
-the brief / upstream plan. If resolving an issue would require an unsafe or
-out-of-scope change, address the underlying concern safely and explain the
-deviation. Then, at the very end, append:
+the brief / upstream plan and **without regressing any resolved-ledger item**. If
+resolving an issue would require an unsafe or out-of-scope change, address the
+underlying concern safely and explain the deviation. If a blocking issue is wrong
+or over-strict, **dispute** it in the notes (address the concern minimally) rather
+than degrading the {{artifact_label}}. Then, at the very end, append:
 
 ```
 ## Revision notes (round {{round}})

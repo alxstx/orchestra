@@ -29,7 +29,8 @@
       { "id": "N1", "title": "Consider pagination", "detail": "List endpoint may grow; note it as a future concern." }
     ],
     "reject_reason": null,
-    "addressed_previous": ["B1", "B2"]
+    "addressed_previous": ["B1", "B2"],
+    "regressions": []
   },
   "history": [
     { "stage": "highlevel", "round": 1, "actor": "codex", "verdict": "APPROVE", "ts": "2026-06-13T10:20:00Z" },

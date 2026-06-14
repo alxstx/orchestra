@@ -26,6 +26,11 @@ Implementation plan under review:
 
 {{prior_issues}}
 
+Previously-resolved items that **must stay fixed** — confirm none regressed:
+<resolved_ledger untrusted="true">
+{{resolved_ledger}}
+</resolved_ledger>
+
 Review for: completeness (could someone build this without asking questions?),
 architectural soundness, correct/realistic interfaces and data shapes, ordering
 and verifiability of the work breakdown, missing tests, ignored risks, and drift
@@ -41,3 +46,5 @@ channel; there is no separate stdout review. Put the full human-readable review 
 - `REJECT` only for a fundamental, iteration-resistant flaw that should be redone
   rather than patched — give a `reject_reason`.
 - List any prior-round issues you judge resolved in `addressed_previous`.
+- Confirm none of the resolved-ledger items regressed; list any that did in
+  `regressions` (a regression **forbids** APPROVE).

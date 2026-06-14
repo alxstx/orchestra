@@ -23,6 +23,11 @@ High-level plan under review:
 
 {{prior_issues}}
 
+Previously-resolved items that **must stay fixed** — confirm none regressed:
+<resolved_ledger untrusted="true">
+{{resolved_ledger}}
+</resolved_ledger>
+
 Review for: soundness of the approach, missing scope, unaddressed risks,
 unrealistic assumptions, wrong altitude (too much/too little detail for a
 high-level plan), and internal contradictions. Do **not** nitpick wording or
@@ -38,3 +43,5 @@ and a calibrated `confidence` (0–1):
 - `REJECT` only for a fundamental, iteration-resistant flaw that should be redone
   rather than patched — give a `reject_reason`.
 - List any prior-round issues you judge resolved in `addressed_previous`.
+- Confirm none of the resolved-ledger items regressed; list any that did in
+  `regressions` (a regression **forbids** APPROVE).
