@@ -114,6 +114,16 @@
             "fallback": { "type": ["string", "null"] },
             "on_limit": { "type": "string", "enum": ["fallback", "pause"] }
           }
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Stage C target topology (DESIGN §6): where the work physically lives.",
+          "properties": {
+            "mode": { "type": "string", "enum": ["greenfield", "brownfield"] },
+            "repo": { "type": ["string", "null"] },
+            "worktree_path": { "type": ["string", "null"] }
+          }
         }
       }
     },

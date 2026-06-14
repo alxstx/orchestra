@@ -54,7 +54,7 @@
           "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
           "title": { "type": "string" },
           "detail": { "type": "string" },
-          "evidence": { "type": "string", "description": "What in LOG.md / STATE.json / reviews supports this (e.g. 'issue at services.py:42 re-raised rounds 3,5,7')." }
+          "evidence": { "type": "string", "description": "TRUSTED-telemetry support: STATE.json round/time/error counts, repeated content-keys, verdict JSON — NOT LOG.md or prose. A halt recommendation must cite this (DESIGN §10.1)." }
         }
       }
     },

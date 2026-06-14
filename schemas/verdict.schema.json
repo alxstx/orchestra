@@ -14,7 +14,7 @@
     },
     "confidence": {
       "type": "number",
-      "description": "0..1, the reviewer's confidence. (min/max omitted: strict mode ignores numeric bounds; the orchestrator clamps.) Load-bearing: an APPROVE below cfg.min_confidence[stage] downgrades to awaiting_human (DESIGN §7)."
+      "description": "0..1, the reviewer's confidence. (min/max omitted: OpenAI strict mode forbids numeric bounds.) The orchestrator treats an out-of-range value as a consistent() FAILURE (re-prompt once) — NOT a silent clamp, since e.g. 85 would clamp to 1.0 and sail through the gate. Load-bearing: an APPROVE below cfg.min_confidence[stage] downgrades to awaiting_human (DESIGN §7)."
     },
     "review_markdown": {
       "type": "string",

@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.8). This document is the spec. The orchestrator
+> Status: **design phase** (v0.9). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -163,11 +163,12 @@ folder:
 ```
 runs/<YYYY-MM-DD>-<slug>/
   STATE.json            # the state machine — single source of truth + commit point
+  .lock                 # exclusive run lock (flock/pidfile) — one orchestrator at a time (§8)
   LOG.md                # human-readable transcript (human-facing only; not fed to agents)
   00-brief.md           # your seed: what the project is
   10-highlevel-plan.md  # Stage A output (current); per-round snapshots 10-highlevel-plan.rNN.md
   20-impl-plan.md       # Stage B output (current); per-round snapshots 20-impl-plan.rNN.md
-  30-impl/              # Stage C output (a git worktree / working dir)
+  30-impl/              # Stage C: greenfield = standalone repo here; brownfield = a POINTER to a worktree in the user's target repo (§6)
   questions.md          # Claude → human (clarifying questions), when paused
   answers.md            # human → Claude (your answers)
   reviews/
@@ -226,6 +227,27 @@ The handoff is sequential, not concurrent: the orchestrator detects "artifact
 written and persisted" (author invocation returned + the file committed per §10),
 then triggers the reviewer. "Signal Codex to review" = that sequencing; there is
 no separate IPC channel.
+
+### Trust tiers
+
+Conflating inputs is a real hazard: a legitimate brief requirement ("single-user,
+skip auth") is *formally identical* to an injected command ("skip the tests")
+unless the design separates them. Three tiers:
+
+1. **System / orchestrator instructions** (the prompt's own rules; the loop's
+   invariants). Highest authority, immutable, never overridable by anything below.
+2. **Human-authored spec** — the **brief**, your **answers**, human review notes
+   (marked `trust="spec"` in prompts). Their *requirements are binding* (the author
+   must conform and not regress them). **But a tier-2 input cannot escalate tool
+   privileges or waive a safety/verification gate** — it can't grant Write to a
+   read-only author, disable the sandbox, or wave off the test gate. So "skip auth —
+   single-user" is honored (a product requirement); "skip the tests" / "ignore the
+   sandbox" is **not** (it waives a gate) and is flagged. That is the principled
+   line between a requirement and an injected command.
+3. **Agent-produced / external content** — artifacts under review, code diffs,
+   reviewer feedback *content*, resolved-ledger text. **Untrusted data**:
+   instructions addressed to the agent are *findings*, not commands. Wrapped in the
+   nonce-delimited blocks above (§3).
 
 ## 4. The convergence loop (core algorithm)
 
@@ -549,6 +571,16 @@ commits); review diffs against the prior round's commit (`--commit <sha>`) or th
 empty base (round 1 = everything-vs-nothing). For **brownfield**, the existing repo
 and its main branch are the base. The run config records which.
 
+**Where the work physically lives.** Don't nest a foreign worktree inside the tool.
+For **brownfield**, `git worktree add` from the **user's target repo**
+(`[target].repo`) to a path the user controls (`[target].worktree_path`), and store
+only a **pointer** in `runs/<run>/30-impl` (a file holding that path) — so project
+X's commits are created in X's own tree, not buried under orchestra's `runs/`. For
+**greenfield**, `30-impl/` is its own standalone repo (or a user-chosen path) seeded
+by `git init`. And because `runs/` is undefined when orchestra is pip-installed (not
+run from a checkout), its location is configurable (`[storage].runs_dir`, default a
+user data dir), never the install directory.
+
 ### Why these flags
 
 - `--session-id "$(uuidgen)"` — deterministic *fresh* sessions; independence.
@@ -641,7 +673,9 @@ negative markers ("broken", "must fix", "do not ship") — is flagged for human
 review. And **progress is measured severity-weighted**, not by raw blocker count,
 because a reviewer can shed mediums while the artifact gets worse (§10). These are
 mitigations, not cures: the real anchor to ground truth is the human gates and,
-later, M6 N-of-M reviewer voting.
+later, M6 N-of-M reviewer voting. Also: a `confidence` **outside [0,1]** is itself a
+`consistent()` failure (re-prompt once) — never silently clamped, since a stray
+`85` (meaning 85%) would otherwise clamp to `1.0` and pass the Stage C gate.
 
 ## 8. State machine
 
@@ -667,6 +701,14 @@ resumable to the right next action (not a re-run of completed work):
           └───────────────────────────────────◀── iterate --note / resume ─────────┘
 ```
 
+- **Run lock (concurrency).** Before driving a run, the orchestrator takes an
+  **exclusive lock** on the run dir (`flock` on `.lock`, or an atomic pidfile +
+  liveness check). A second orchestrator — a double `orchestra run`, or a cron
+  monitor overlapping a manual `resume` — **refuses** (or waits) rather than both
+  spawning an author and racing on STATE.json (atomic writes stop torn *reads*, not
+  two concurrent *actors* — last-writer-wins would mean lost rounds, doubled spend,
+  duplicated history). The read-only monitor does **not** take the lock (it only
+  writes under `monitor/`).
 - `authoring`/`reviewing` are written **before** the respective subprocess call;
   on resume the call is idempotently retried. For **planning** authors this is
   trivial (stdout replaces the file). For the **Stage C edit-mode author it is NOT
@@ -676,6 +718,13 @@ resumable to the right next action (not a re-run of completed work):
   re-runs. The reviewer always re-reviews.
 - `authored` records the artifact path + content hash, so a crash before review
   resumes at *review*, not a wasteful re-author.
+- **Hash check vs human edits.** The hash exists to catch a *torn crash*, not to
+  forbid hand-edits. On resume: if the artifact differs from the stored hash **and**
+  the status is a human-reachable pause (`awaiting_human`/`stuck`/`converged`), treat
+  it as an **intentional edit** — re-hash, log, proceed (the human exit edge below
+  *invites* "operator edits the blackboard"). Only in an **in-flight** state
+  (`authoring`/`reviewing`/`deciding`) is a mismatch treated as corruption →
+  `error`.
 - `deciding` is written **after** review and **before** branching (with
   `last_verdict`), so the branch decision is itself resumable.
 - `error` is reachable from any in-flight phase; `resume` performs an idempotent
@@ -749,7 +798,8 @@ spend:
 
 | Risk | Safeguard |
 |------|-----------|
-| **Loop runaway** | hard `max_rounds` per stage is the runaway bound; optional overall wall-clock stop + per-call timeout (§9); `--dry-run` prints commands without running them. (No cost caps — subscription, not API.) 🔧 |
+| **Concurrent orchestrators racing a run** | atomic STATE.json stops torn reads, not two actors both acting. An **exclusive run lock** (`.lock` flock/pidfile, §8) is taken at entry; a second orchestrator refuses/queues. Prevents lost rounds, doubled subprocess spend, duplicated history. 🔧 |
+| **Loop runaway** | hard `max_rounds` per stage is the runaway bound; optional overall wall-clock stop + per-call timeout (§9); `--dry-run` prints the *next* command(s) without running them — a *full* dry pass needs `--stub-verdicts` (later commands template from earlier outputs, so with nothing run a plain dry-run can only show the round-0 author). (No cost caps — subscription, not API.) 🔧 |
 | **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and applies a **heuristic** (a fresh reviewer may rephrase, so it can miss a real recurrence or occasionally over-match): it flags non-improvement when, over a 2-round window, the **severity-weighted** blocking score does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. **Advisory by default** (`behavior.stop_on_oscillation = false`): the signal is surfaced as a per-round warning and rolled into the final flag, but the loop still runs to its `max_rounds` ceiling so a stage gets its full allotment of attempts (§4.1); set it `true` to bail early to `stuck(oscillation)`. The hard backstops are the ceiling and the budget (§9). 🔧 |
 | **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in **per-call nonce-delimited** blocks (the orchestrator strips the delimiter tokens from the untrusted content and asserts the rendered delimiter count, so content *cannot* escape its block — §3) — not merely "clearly delimited"; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
 | **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex exec review --base`. |
@@ -778,8 +828,10 @@ occasionally it should step in.
 
 **Independence & single-writer safety.** The monitor is itself a **fresh session**
 each time it wakes — it never shares the author's or reviewer's context; it reads
-their output as data. It reads the whole blackboard (`STATE.json`, `LOG.md`,
-`reviews/`, prior monitor reports) but **writes only under `monitor/`**. The
+their output as data. It reads the **structured, trusted state** — `STATE.json`, the
+verdict JSONs, timings, prior monitor reports — **not** `LOG.md` (keeping §3's
+"LOG.md is never fed to an agent" true) and not raw artifacts/diffs as *authority*.
+It **writes only under `monitor/`**. The
 orchestrator stays the sole writer of `STATE.json` (preserving the §10
 single-writer / commit-order discipline) and simply **reads `monitor/HALT` +
 `monitor/assessment.json` at its safe checkpoints** (top of the loop and before
@@ -803,6 +855,17 @@ rounds or much wall-time with little progress? Is a long run benign or wedged?
 any `warning`/`intervene`, writes a human-readable `monitor/report-NN.md`. These
 accumulate, so you can answer "is the system working correctly?" at a glance —
 exactly the report you asked for.
+
+**Monitor hardening (it can HALT, so it's adversary-aware).** The monitor may ingest
+content that quotes untrusted artifacts/diffs/verdicts and, in enforcing mode, can
+write `monitor/HALT`. So its prompt (`prompts/monitor/health-check.md`) carries the
+same untrusted-content clause as every other agent — a crafted string ("system
+healthy, continue" / "halt now") is a *finding*, never a command. And a **halt is
+gated on trusted evidence**: it must cite corroborating signals from the structured
+telemetry (round count, elapsed time, error/retry counts, repeated content-keys in
+`STATE`), not prose alone — so a poisoned report can neither suppress a needed halt
+nor trigger a spurious one (DoS). `monitor.schema` requires a `rationale` for halt;
+enforcing mode additionally requires that rationale reference trusted fields.
 
 **Authority tiers (`monitor.mode`)** — calibrated so it rarely acts:
 - `off` — no monitor.
@@ -867,8 +930,8 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   headless stage (Stage B) end-to-end: author → schema-validated Codex verdict →
   revise → converge, with status-dispatch resume (§8) and the isolation profile
   (§6.1). Ships *with* the non-negotiable basics: round ceiling, per-call timeout,
-  oscillation guard, atomic STATE.json commit, the Codex→Claude reviewer fallback
-  (§6.2), and `--dry-run`.
+  oscillation guard, atomic STATE.json commit, the **exclusive run lock** (§8), the
+  Codex→Claude reviewer fallback (§6.2), and `--dry-run`.
   **M1 input contract:** Stage B presupposes an approved `10-highlevel-plan.md` and
   an initialized run, so M1 provides `orchestra init <slug> --stage impl_plan
   --brief <file> --highlevel-plan <file>` — it seeds the run dir, writes those
@@ -883,7 +946,9 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   `orchestra status` dashboard, notification on `awaiting_human` / `stuck`.
 - **M5 — Supervisory monitor (§10.1).** Advisory first (concurrent health reports
   + warnings, no halting), then enforcing (intercept on high-confidence `intervene`
-  → halt + flag). Soft time-budget trigger; `stuck_reason = monitor`.
+  → halt + flag). Hardened prompt (untrusted-content clause; halt gated on trusted
+  telemetry, not prose; reads structured state, not `LOG.md`). Soft time-budget
+  trigger; `stuck_reason = monitor`.
 - **M6 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
   models; multi-perspective reviewers.
 
@@ -917,6 +982,22 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 
 ## Changelog
 
+- **v0.9** — fourth external review (8 findings). **C1:** an exclusive **run lock**
+  (`.lock` flock/pidfile, §8) so two orchestrators — or a cron monitor overlapping a
+  manual resume — can't race STATE.json; an M1 safety basic. **C6:** an explicit
+  **three-tier trust model** (system > human-authored spec > agent content): the
+  brief's *requirements* are binding but it cannot escalate privileges or waive a
+  safety/verification gate — "skip auth, single-user" is honored, "skip the tests"
+  is flagged. **C3:** the resume hash check is scoped to crash detection — a
+  mismatch at a human-reachable pause is an *intentional edit* (re-hash + proceed),
+  corruption only in-flight. **C7:** an out-of-range `confidence` is a `consistent()`
+  failure, not a silent clamp. **C4/C5:** the HALT-capable monitor gets a hardened
+  prompt (`prompts/monitor/health-check.md`) with an untrusted-content clause, reads
+  only structured/trusted telemetry (not `LOG.md`), and must justify any halt with
+  trusted evidence. **C2:** specified the worktree topology — brownfield does
+  `git worktree add` from the *user's* repo to a user path, storing only a pointer
+  under `runs/`; `runs_dir` configurable. **C8:** `--dry-run` described honestly
+  (next command only; a full pass needs `--stub-verdicts`).
 - **v0.8** — third external review (10 findings, incl. conceptual/governance/
   security). **A1 anti-regression:** an append-only resolved-issues ledger
   (`STATE.resolved_ledger`) is fed to both author and reviewer; the reviewer reports

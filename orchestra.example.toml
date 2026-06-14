@@ -88,6 +88,17 @@ call_timeout_seconds = 600     # per subprocess hang protection; a hung child is
 test_command = ""              # e.g. "pytest -q" or "npm test --silent"
 test_timeout_seconds = 600
 
+# Where runs and the Stage C worktree live (DESIGN §3/§6). Avoid nesting a foreign
+# worktree under the tool.
+[storage]
+runs_dir = ""                  # where runs/ lives; "" = a user data dir (NOT the install dir)
+
+[target]
+mode = "greenfield"            # "greenfield" (build from scratch) | "brownfield" (existing repo)
+repo = ""                      # brownfield: path to the user's target git repo
+worktree_path = ""             # brownfield: user-controlled path for `git worktree add`
+                               #   (runs/<run>/30-impl stores only a POINTER, not a nested worktree)
+
 # Supervisory monitor (DESIGN §10.1): an optional concurrent overseer that judges
 # run HEALTH (not the artifact) and writes accumulating reports under monitor/.
 # It is single-writer-safe — it only writes monitor/; the orchestrator reads
