@@ -2,13 +2,26 @@
 # Per-run overrides live in runs/<run>/STATE.json.config.
 
 [models]
-author = "claude-opus-4-8"     # Claude does the planning & implementation
-reviewer = "gpt-5-codex"       # Codex does the independent review (set to your codex model)
+# Claude author: prefer an alias so it tracks the latest model; pin an exact id
+# (e.g. "claude-opus-4-8") only when you need reproducibility.
+author = "opus"
+# Codex reviewer: leave commented / empty to use Codex's own configured default
+# model (recommended — avoids hardcoding an id that may rot). Set explicitly to
+# pin one. When unset, the orchestrator omits --model on the codex invocation.
+# reviewer = "<codex-model-id>"
 
 [max_rounds]
 highlevel = 6                  # Stage A is human-driven; this is a safety cap
 impl_plan = 4                  # Stage B auto-loop cap
 implementation = 5             # Stage C auto-loop cap
+
+# Per-stage APPROVE confidence floor. An APPROVE below the floor downgrades to
+# awaiting_human instead of auto-advancing. 0 = disabled. Most useful on the
+# autonomous (none-gate) implementation stage.
+[min_confidence]
+highlevel = 0.0
+impl_plan = 0.0
+implementation = 0.6
 
 # Human-in-the-loop level per stage: heavy | some | none
 [gate]
@@ -18,15 +31,21 @@ implementation = "none"
 
 # Least-privilege per stage.
 [sandbox]
-# Claude permission-mode for the author:
-author_plan = "plan"           # planning stages: no file edits
-author_impl = "acceptEdits"    # implementation: edits confined to the worktree
-# Codex sandbox for the reviewer (always read-only — never mutates what it reviews):
+# Claude author:
+author_plan = "read-only"      # planning stages: whitelist read tools only; capture .result
+                               #   (NOT --permission-mode plan — see DESIGN §6 ⚠️)
+author_impl = "acceptEdits"    # implementation: edits confined to the worktree via --add-dir
+# Codex reviewer is always read-only. On `codex exec` (Stage A/B) this is
+# `--sandbox read-only`; the `codex exec review` path (Stage C) is intrinsically
+# read-only (no --sandbox flag there).
 reviewer = "read-only"
 
+# Cost is bounded mechanically, independent of max_rounds (which only bounds
+# iteration count). Non-zero defaults so a runaway is capped out of the box.
 [budget]
-wall_clock_seconds = 0         # 0 = unlimited
-tokens = 0                     # 0 = unlimited
+wall_clock_seconds = 3600      # per run; 0 = unlimited (not recommended)
+tokens = 2000000               # per run; 0 = unlimited (not recommended)
+call_timeout_seconds = 600     # per claude/codex subprocess; a hung child is killed
 
 [behavior]
 fresh_author_on_revise = true  # true = fresh session each revise round (independence)

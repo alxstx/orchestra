@@ -51,9 +51,13 @@ def render_prompt(template: str, **ctx: str) -> str:
 def claude_generate(prompt: str, *, edit_dir: Path | None = None) -> str:
     """Run a fresh `claude -p` session and return its result text.
 
-    Planning: --permission-mode plan, capture .result as the artifact.
+    Planning: read-only (whitelist Read/Grep/Glob so edits are unavailable),
+        --output-format json, capture .result as the artifact. NOT
+        --permission-mode plan, which is an interactive-approval primitive that
+        can halt headless runs at the plan boundary (DESIGN §6 ⚠️ / §13).
     Implementation: --permission-mode acceptEdits --add-dir <edit_dir>.
-    Always --session-id $(uuid4) for a fresh session.
+    Always --session-id $(uuid4) for a fresh session. Runs under the per-call
+    timeout from config.budget.call_timeout_seconds.
     """
     raise NotImplementedError("M1")
 
@@ -62,12 +66,16 @@ def claude_generate(prompt: str, *, edit_dir: Path | None = None) -> str:
 # codex — reviewer invocations (see DESIGN §6)
 # --------------------------------------------------------------------------- #
 def codex_review(prompt: str, *, verdict_path: Path, diff_base: str | None = None) -> dict:
-    """Run a fresh Codex review and return the parsed verdict.
+    """Run a fresh Codex review and return the schema-validated verdict.
 
-    Uses --output-schema schemas/verdict.schema.json and
-    --output-last-message <verdict_path> so the final message is a clean JSON
-    verdict. For Stage C, prefer `codex review --base <diff_base>`. Always
-    --sandbox read-only.
+    Plan stages: `codex exec --sandbox read-only --output-schema
+        schemas/verdict.schema.json --output-last-message <verdict_path>`.
+    Implementation (diff_base set): `codex exec review --base <diff_base>
+        --output-schema ... --output-last-message ...` — the verdict flags live
+        on `codex exec`/its `review` subcommand, NOT on bare `codex review`
+        (DESIGN §6). The review subcommand is intrinsically read-only.
+    Validates the result against verdict.schema.json; an invalid/inconsistent
+    verdict is re-prompted once, then escalated (never treated as CONVERGED).
     """
     raise NotImplementedError("M1")
 

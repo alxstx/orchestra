@@ -2,26 +2,58 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alxstx/orchestra/schemas/state.schema.json",
   "title": "Orchestra run state",
-  "description": "STATE.json — the single source of truth for a run. The orchestrator is a pure function of this file plus the blackboard.",
+  "description": "STATE.json — the single source of truth AND the commit point for a run. Written last and atomically (DESIGN §10). The orchestrator is a pure function of this file plus the blackboard. Every external call has a persisted phase on both sides so any crash resumes to the correct next action.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["run_id", "created_at", "stage", "status", "round", "gate", "config"],
+  "required": ["run_id", "created_at", "updated_at", "stage", "status", "round", "gate", "config"],
   "properties": {
     "run_id": { "type": "string", "description": "e.g. 2026-06-13-todo-api" },
     "created_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": "string", "format": "date-time", "description": "When pipeline execution began; basis for the wall-clock budget." },
+    "updated_at": { "type": "string", "format": "date-time", "description": "Bumped on every state write; orchestra status flags staleness (possible hang)." },
     "stage": {
       "type": "string",
       "enum": ["highlevel", "impl_plan", "implementation", "done"]
     },
     "status": {
       "type": "string",
-      "enum": ["running", "deciding", "awaiting_human", "converged", "stuck", "error"]
+      "enum": ["authoring", "authored", "reviewing", "deciding", "awaiting_human", "converged", "stuck", "error", "done"],
+      "description": "Persisted phase. authoring/reviewing are written BEFORE the subprocess call (idempotent retry on resume). authored records artifact written/pending review. deciding is written after review with last_verdict, before branching. See DESIGN §8."
     },
-    "round": { "type": "integer", "minimum": 0 },
+    "waiting_for": {
+      "type": ["string", "null"],
+      "enum": ["approval", "answers", null],
+      "description": "Discriminator when status == awaiting_human: are we blocked on a human approval/iterate decision, or on answers.md? Null otherwise."
+    },
+    "stuck_reason": {
+      "type": ["string", "null"],
+      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "error", null],
+      "description": "Set when status == stuck; lets orchestra status distinguish a cheap fundamental REJECT from an expensive burned-out loop. Null otherwise."
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-stage, resets to 0 on stage entry. Round 0 = initial author draft (pre-review). Round k (>=1) = the k-th review + the revise that produced the reviewed artifact. On resume, derived from history's max round for the current stage."
+    },
     "gate": {
       "type": "string",
       "enum": ["heavy", "some", "none"],
-      "description": "Human-in-loop level for the current stage."
+      "description": "Human-in-loop level for the current stage. Reset to the new stage's configured tier on stage advance."
+    },
+    "current_step": {
+      "type": ["string", "null"],
+      "enum": ["author", "review", "decide", "test", null],
+      "description": "Fine-grained liveness hint for observability."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Retry attempts for the current in-flight call (retry/backoff accounting, DESIGN §10)."
+    },
+    "tokens_spent": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Accumulated output tokens (Claude usage + Codex); checked against config.budget.tokens (DESIGN §9)."
     },
     "config": {
       "type": "object",
@@ -36,20 +68,31 @@
             "implementation": { "type": "integer", "minimum": 1 }
           }
         },
+        "min_confidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-stage APPROVE confidence floor; below it an APPROVE downgrades to awaiting_human. 0 disables.",
+          "properties": {
+            "highlevel": { "type": "number", "minimum": 0, "maximum": 1 },
+            "impl_plan": { "type": "number", "minimum": 0, "maximum": 1 },
+            "implementation": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
         "models": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "author": { "type": "string" },
-            "reviewer": { "type": "string" }
+            "author": { "type": "string", "description": "Claude model/alias, e.g. 'opus'." },
+            "reviewer": { "type": ["string", "null"], "description": "Codex model id, or null to use Codex's configured default." }
           }
         },
         "budget": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "wall_clock_seconds": { "type": "integer", "minimum": 0 },
-            "tokens": { "type": "integer", "minimum": 0 }
+            "wall_clock_seconds": { "type": "integer", "minimum": 0, "description": "0 = unlimited (not recommended)." },
+            "tokens": { "type": "integer", "minimum": 0, "description": "0 = unlimited (not recommended)." },
+            "call_timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-subprocess timeout; a hung child is killed." }
           }
         }
       }
@@ -67,9 +110,10 @@
         "properties": {
           "stage": { "type": "string" },
           "round": { "type": "integer" },
-          "actor": { "type": "string", "enum": ["claude", "codex", "human"] },
+          "actor": { "type": "string", "enum": ["claude", "codex", "human", "orchestrator"] },
           "verdict": { "type": "string" },
-          "artifact": { "type": "string" },
+          "artifact": { "type": "string", "description": "Path to the round's artifact snapshot." },
+          "artifact_hash": { "type": "string", "description": "Content hash recorded at 'authored', so resume knows the draft is committed." },
           "note": { "type": "string" },
           "ts": { "type": "string", "format": "date-time" }
         }

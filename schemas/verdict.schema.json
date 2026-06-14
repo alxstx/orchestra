@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alxstx/orchestra/schemas/verdict.schema.json",
   "title": "Codex review verdict",
-  "description": "The machine-readable verdict Codex emits as its final message for each review round. Drives the convergence loop.",
+  "description": "The machine-readable verdict Codex emits as its final message for each review round. Drives the convergence loop. The allOf below makes the load-bearing invariant structural: APPROVE iff blocking_issues is empty; REVISE has at least one blocking issue. A self-contradictory verdict fails validation and is treated by the orchestrator as an error to re-prompt once then escalate (never CONVERGED).",
   "type": "object",
   "additionalProperties": false,
   "required": ["decision", "summary", "blocking_issues", "non_blocking_suggestions"],
@@ -10,13 +10,13 @@
     "decision": {
       "type": "string",
       "enum": ["APPROVE", "REVISE", "REJECT"],
-      "description": "APPROVE = converged (blocking_issues must be empty). REVISE = at least one blocking issue, iterate. REJECT = fundamental flaw iteration won't fix, escalate to human."
+      "description": "APPROVE = converged (blocking_issues empty). REVISE = >=1 blocking issue, iterate. REJECT = fundamental flaw iteration won't fix, escalate to human."
     },
     "confidence": {
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "Reviewer's confidence in this verdict."
+      "description": "Reviewer's confidence. Load-bearing: an APPROVE with confidence below cfg.min_confidence[stage] downgrades to awaiting_human instead of auto-advancing (see DESIGN §7). Set the threshold to 0 to disable that gate."
     },
     "summary": {
       "type": "string",
@@ -24,18 +24,18 @@
     },
     "blocking_issues": {
       "type": "array",
-      "description": "Issues that MUST be fixed before approval. Empty iff decision is APPROVE.",
+      "description": "Issues that MUST be fixed before approval. Empty iff decision is APPROVE (enforced by allOf).",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "severity", "title", "detail", "suggested_fix"],
         "properties": {
-          "id": { "type": "string", "description": "Stable short id, e.g. B1, B2." },
+          "id": { "type": "string", "description": "Short id, e.g. B1, B2. NOTE: ids are emitted fresh by an independent reviewer each round and are NOT stable across rounds; the orchestrator must not key oscillation/regression logic on them (see DESIGN §10)." },
           "severity": { "type": "string", "enum": ["critical", "high", "medium"] },
           "title": { "type": "string" },
           "detail": { "type": "string" },
-          "location": { "type": "string", "description": "Where in the artifact (section/file/line), if applicable." },
-          "suggested_fix": { "type": "string" }
+          "location": { "type": "string", "description": "Where in the artifact (section/file/line), if applicable. Used with title to derive a stable content key." },
+          "suggested_fix": { "type": "string", "description": "A PROPOSAL, not a command. The author addresses the underlying concern and may deviate (noting why) if the literal fix would be unsafe or out of scope." }
         }
       }
     },
@@ -55,8 +55,18 @@
     },
     "addressed_previous": {
       "type": "array",
-      "description": "IDs of prior-round blocking issues the reviewer judges resolved this round. Used for oscillation/regression detection.",
+      "description": "IDs of prior-round blocking issues the reviewer judges resolved this round. Advisory only: validated by the orchestrator against the actual prior verdict's ids before being trusted.",
       "items": { "type": "string" }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "const": "APPROVE" } }, "required": ["decision"] },
+      "then": { "properties": { "blocking_issues": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "REVISE" } }, "required": ["decision"] },
+      "then": { "properties": { "blocking_issues": { "minItems": 1 } } }
+    }
+  ]
 }

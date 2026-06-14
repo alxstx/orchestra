@@ -1,8 +1,12 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0). This document is the spec. The orchestrator
+> Status: **design phase** (v0.2). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
-> in a later pass.
+> (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
+> the changelog at the end.
+>
+> Throughout, a 🔧 marks a rule whose *contract* is fixed here now but whose
+> *implementation* is a named build milestone.
 
 ## 1. What & why
 
@@ -24,21 +28,27 @@ state, no conversation memory leaking between author and reviewer — just files
 
 ### Design principles
 
-1. **Fresh sessions for independence.** Every generate and every review is a new
-   `claude --session-id <new-uuid>` or a new `codex exec`. No `--resume` across
-   the author/reviewer boundary. Independence > efficiency.
+1. **Fresh sessions across the boundaries that matter.** Every author step and
+   every review step crosses a fresh-session boundary: a new
+   `claude --session-id <new-uuid>` or a new `codex exec`. The **author/reviewer**
+   boundary and the **cross-stage** boundary are *always* fresh — never
+   `--resume` across them. (Intra-stage author revisions and Stage A's
+   interactive conversation are the two calibrated exceptions; see §2 and §13.)
 2. **Blackboard, not message-passing.** State lives in files under `runs/<run>/`.
    Any step can be re-run by pointing a fresh agent at the same files. This makes
    the whole pipeline auditable (it's just Markdown + JSON in git) and resumable.
-3. **Machine-readable verdicts.** Codex emits a JSON verdict against a fixed
-   schema (`schemas/verdict.schema.json`) *in addition* to its prose review. The
-   verdict is what lets the loop terminate itself instead of needing you to
-   eyeball every round.
+3. **Machine-readable, self-consistent verdicts.** Codex emits a JSON verdict
+   against a fixed schema (`schemas/verdict.schema.json`) *in addition* to its
+   prose review. The schema *structurally* enforces the one invariant the whole
+   loop rests on — `APPROVE` ⟺ no blocking issues — so a self-contradictory
+   verdict can't slip an artifact through (§7).
 4. **Gates calibrated per stage.** Human involvement is high where judgment
    matters most (the high-level plan) and tapers to zero where the work is
    mechanical (implementation). See §5.
-5. **Everything is resumable.** `STATE.json` is the single source of truth for
-   "where are we"; the orchestrator is a pure function of the blackboard.
+5. **STATE.json is the commit point.** It is the single source of truth for
+   "where are we", written last and atomically (§8, §10). The orchestrator is a
+   pure function of the blackboard: kill it anytime, `orchestra resume`, and it
+   reconstructs intent from `STATE.json` + the files on disk.
 
 ## 2. The pipeline
 
@@ -54,9 +64,21 @@ different automation level and a different exit gate.
 
 | Stage | Artifact | Author | Reviewer | Loop | Human gate |
 |-------|----------|--------|----------|------|------------|
-| A. High-level plan | `10-highlevel-plan.md` | interactive Claude (Q&A) | headless Codex | human-driven rounds | **heavy** — you approve every round & advance |
-| B. Implementation plan | `20-impl-plan.md` | headless Claude | headless Codex | auto until APPROVE / max-rounds | **some** — you approve the converged plan before C |
-| C. Implementation | `30-impl/` (a diff) | headless Claude (edit mode) | headless `codex review` | auto until APPROVE / max-rounds | **none** until the end — you review the final diff/PR |
+| A. High-level plan | `10-highlevel-plan.md` | interactive Claude (Q&A) | headless `codex exec` | human-driven rounds | **heavy** — you approve every round & advance |
+| B. Implementation plan | `20-impl-plan.md` | headless Claude | headless `codex exec` | auto until APPROVE / max-rounds | **some** — you approve the converged plan before C |
+| C. Implementation | `30-impl/` (a diff) | headless Claude (edit mode) | headless `codex exec review` | auto until APPROVE / max-rounds | **none** until the end — you review the final diff/PR |
+
+**Freshness vs principle 1.** Cross-stage and author/reviewer boundaries are
+always fresh, so each of {high-level plan, impl plan, implementation} is its own
+fresh Claude lineage and every Codex review is a fresh session — satisfying the
+"fresh session for each" requirement. The two deliberate exceptions:
+
+- **Stage A is an interactive conversation**, so its author session is *continuous
+  within the stage* by nature (you and Claude are talking). Codex reviews of it
+  are still fresh each round.
+- **Intra-stage author revisions (B/C)** default to fresh sessions (independence)
+  but may resume for cost — a config knob (`behavior.fresh_author_on_revise`),
+  see §13.
 
 ### Stage A — high-level plan (heavy HITL)
 
@@ -71,9 +93,12 @@ auto-looping:
    `10-highlevel-plan.md`.
 2. Orchestrator fires a **headless Codex** review of that plan → `reviews/A-NN-review.md`
    + `reviews/A-NN-verdict.json`.
-3. You read Codex's review and decide: **iterate** (take its points back into the
-   interactive Claude session) or **approve** (advance to Stage B).
-4. Repeat until you approve.
+3. You read Codex's review and decide: **iterate** or **approve**. When iterating
+   you may *also add your own review* — a human-authored note saved to
+   `reviews/A-NN-human.md` — which is fed into the next Claude author round
+   alongside Codex's. (This is the user's "human still adding reviews" channel.)
+4. Repeat until you approve. `max_rounds.highlevel` is a safety cap covering both
+   authoring iterations and Codex review rounds.
 
 Codex reviews are headless and cheap; *you* are the convergence function here.
 
@@ -82,26 +107,33 @@ Codex reviews are headless and cheap; *you* are the convergence function here.
 Now the artifact is concrete enough to auto-loop. Both sides run headless:
 
 1. Fresh headless Claude reads `00-brief.md` + approved `10-highlevel-plan.md` →
-   writes `20-impl-plan.md`.
+   writes `20-impl-plan.md` (round 0 draft).
 2. Fresh headless Codex reviews it → verdict JSON.
-3. `APPROVE` → exit loop. `REVISE` → feed `blocking_issues` into a *fresh* Claude
-   session that revises the plan → back to step 2. Cap at `max_rounds`.
-4. On exit, **status = awaiting_human**: you review the converged plan (and the
-   round-by-round `LOG.md`) and either approve → Stage C, or inject feedback for
-   another round.
+3. `APPROVE` → exit loop. `REVISE` → feed `blocking_issues` (and the brief +
+   high-level plan, so the author can't drift while closing blockers) into a
+   *fresh* Claude session that revises the plan → back to step 2. Cap at
+   `max_rounds.impl_plan`.
+4. On exit, **status = awaiting_human, waiting_for = approval**: you review the
+   converged plan (and `LOG.md`) and either approve → Stage C, or inject feedback
+   (`orchestra iterate --note`) for another round.
 
 "Some HITL" = the loop runs itself, but a human signs off on the plan before any
 code is written, and may interject between rounds.
 
 ### Stage C — implementation (autonomous)
 
-1. Fresh headless Claude, running in **edit mode** inside an isolated worktree
+1. Fresh headless Claude, in **edit mode** inside an isolated git worktree
    (`30-impl/`), implements against the approved `20-impl-plan.md`.
-2. `codex review --base <branch>` reviews the actual diff → verdict JSON.
-3. `APPROVE` → done. `REVISE` → fresh Claude session reads the diff + review and
-   fixes it → re-review. Cap at `max_rounds`.
-4. On `APPROVE` or cap, present the final diff / open a PR for your review. This
-   is the only human touchpoint in Stage C.
+2. 🔧 The orchestrator runs the plan's **test command** in the worktree itself and
+   captures the exit code + output. That result is fed into the review prompt as a
+   *trusted, orchestrator-produced* field — so "tests pass" is a real, executed
+   gate, not the author's self-claim (see §6, §10).
+3. `codex exec review --base <branch>` reviews the actual diff → verdict JSON.
+4. `APPROVE` (with green tests) → done. `REVISE` → a fresh Claude session reads the
+   diff + review + test output and fixes it → re-test → re-review. Cap at
+   `max_rounds.implementation`.
+5. On `APPROVE` or cap, present the final diff / open a PR for your review. This is
+   the only human touchpoint in Stage C.
 
 ## 3. The blackboard layout
 
@@ -110,113 +142,166 @@ folder:
 
 ```
 runs/<YYYY-MM-DD>-<slug>/
-  STATE.json            # the state machine — single source of truth
-  LOG.md                # human-readable transcript of the whole ping-pong
+  STATE.json            # the state machine — single source of truth + commit point
+  LOG.md                # human-readable transcript (human-facing only; not fed to agents)
   00-brief.md           # your seed: what the project is
-  10-highlevel-plan.md  # Stage A output
-  20-impl-plan.md       # Stage B output
+  10-highlevel-plan.md  # Stage A output (current); per-round snapshots 10-highlevel-plan.rNN.md
+  20-impl-plan.md       # Stage B output (current); per-round snapshots 20-impl-plan.rNN.md
   30-impl/              # Stage C output (a git worktree / working dir)
   questions.md          # Claude → human (clarifying questions), when paused
   answers.md            # human → Claude (your answers)
   reviews/
-    A-01-review.md      # Codex prose review, Stage A round 1
-    A-01-verdict.json   # Codex machine verdict, Stage A round 1
-    B-01-review.md  B-01-verdict.json
-    C-01-review.md  C-01-verdict.json
+    A-01-review.md   A-01-verdict.json   A-01-human.md   # human review note (optional)
+    B-01-review.md   B-01-verdict.json
+    C-01-review.md   C-01-verdict.json   C-01-tests.txt  # captured test run for the round
     ...
 ```
 
-Naming: `<stage-letter>-<round:02d>-{review.md,verdict.json}`. Stages are
-`A`/`B`/`C`; rounds are 1-based per stage.
+Naming: `<stage-letter>-<round:02d>-{review.md,verdict.json,...}`. Stages are
+`A`/`B`/`C`; rounds are 1-based per stage (see "Round semantics" in §4).
+
+### The agent-to-agent "memory"
+
+The shared md memory you have in mind is this folder. But not all of it is fed to
+the agents — feeding everything would bloat context and re-introduce the coupling
+fresh sessions exist to avoid. Each round, the **memory handed to an agent** is a
+specific slice:
+
+- **Author (revise):** brief + approved upstream plan + the *current* artifact +
+  the *latest* verdict's blocking issues (+ any human review note).
+- **Reviewer:** brief + approved upstream plan + the artifact under review + a
+  short digest of still-open prior issues (`{{prior_issues}}`).
+- **`LOG.md` is human-facing only** — it is never fed back into an agent prompt.
+
+The handoff is sequential, not concurrent: the orchestrator detects "artifact
+written and persisted" (author invocation returned + the file committed per §10),
+then triggers the reviewer. "Signal Codex to review" = that sequencing; there is
+no separate IPC channel.
 
 ## 4. The convergence loop (core algorithm)
 
 The same primitive drives Stages B and C (Stage A is the human-driven variant):
 
 ```
-def run_stage(stage, blackboard, max_rounds):
-    artifact = author_generate(stage, blackboard)        # fresh Claude
-    for round in 1..max_rounds:
-        verdict = review(stage, artifact, blackboard)    # fresh Codex, JSON schema
-        persist(verdict, round)
+def run_stage(stage, blackboard, cfg):
+    round = resume_round(blackboard, stage)          # derived from history, not a stale counter
+    if round == 0:
+        artifact = author_generate(stage, blackboard)   # fresh Claude; round 0 = initial draft
+    else:
+        artifact = current_artifact(blackboard, stage)  # resuming mid-stage
+    while round < cfg.max_rounds[stage]:
+        round += 1
+        check_budget_or_escalate(blackboard)         # before every external call (§9)
+        verdict = review(stage, artifact, blackboard)   # fresh Codex, schema-validated
+        persist(verdict, round); set_status("deciding") # commit point before branching
+        if not consistent(verdict):                  # APPROVE w/ blockers, or REVISE w/o — §7
+            return STUCK(reason="error")             # coerce/escalate, never CONVERGED
         if verdict.decision == "APPROVE":
+            if low_confidence(verdict, cfg, stage):  # §7 confidence rule
+                return AWAITING_HUMAN(reason="approval")
             return CONVERGED
         if verdict.decision == "REJECT":
-            return STUCK                                 # fundamental flaw → human
-        artifact = author_revise(stage, artifact,        # fresh Claude
+            return STUCK(reason="rejected")          # fundamental flaw → human
+        if oscillating(blackboard, stage):           # orchestrator-computed, §10
+            return STUCK(reason="oscillation")
+        artifact = author_revise(stage, artifact,    # fresh Claude (or resume per cfg)
                                  verdict.blocking_issues, blackboard)
-    return STUCK                                          # hit max_rounds → human
+    return STUCK(reason="max_rounds")
 ```
 
-- **CONVERGED** → advance (Stage B pauses for human approval; Stage C finishes).
-- **STUCK** → `status = stuck`, escalate to the human with the full `LOG.md`.
-- **Oscillation guard** (see §8): if two consecutive verdicts raise issues that are
-  not strict subsets of the prior round's, flag possible disagreement and escalate
-  early rather than burning rounds.
+- **CONVERGED** → APPROVE+gate logic (§8) decides the next status: `awaiting_human`
+  if the stage's gate ∈ {heavy, some}, else advance / `done`.
+- **STUCK** → terminal-until-human, tagged with `stuck_reason` ∈ {rejected,
+  max_rounds, budget_exceeded, oscillation, error}, surfaced by `orchestra status`.
+
+**Round semantics.** `round` is **per-stage** and resets to 0 when a stage begins.
+Round 0 is the initial author draft (no review yet); round *k* (k ≥ 1) is the
+*k*-th review plus the revise that produced the artifact it reviewed. With
+`max_rounds[stage] = N`, the loop performs **at most N reviews** and therefore at
+most **N−1 revisions** after the initial draft. On resume, the starting round is
+derived as the max round recorded in `history` for the current stage — never a
+possibly-stale counter.
 
 ## 5. Human-in-the-loop mechanism
 
-A headless pipeline still has to stop and wait for you. Three mechanisms:
+A headless pipeline still has to stop and wait for you. Three mechanisms, all
+discriminated so resume is never ambiguous:
 
-1. **Approval gates.** When a stage reaches a gate, the orchestrator sets
-   `status = awaiting_human` and exits (or blocks). You resume with
-   `orchestra approve <run>` / `orchestra iterate <run> --note "..."`.
-2. **Question round-trip** (Stage A, and any time a headless author is unsure).
-   The author writes `questions.md` and signals `status = awaiting_human`; you
-   fill in `answers.md`; the next author invocation gets both appended to its
-   context.
+1. **Approval gates.** At a gate the orchestrator sets `status = awaiting_human,
+   waiting_for = approval` and **exits** (it does not hold a blocking process —
+   see "idle model" below). You resume with `orchestra approve <run>` /
+   `orchestra iterate <run> --note "..."`.
+2. **Question round-trip** (Stage A, or any headless author that's unsure). The
+   author writes `questions.md`; orchestrator sets `status = awaiting_human,
+   waiting_for = answers`; you fill in `answers.md`; the next author invocation
+   gets both appended. On resume, `waiting_for` tells the orchestrator whether to
+   look for `answers.md` or wait for an approve command.
 3. **Interactive escape hatch.** Stage A is interactive by default; any stage can
    be dropped to interactive Claude via `--interactive` for a hands-on round.
 
-The three gate tiers (`heavy` / `some` / `none`) map directly onto the stages and
-are configurable per-run in `STATE.json.gate`.
+The three gate tiers (`heavy` / `some` / `none`) map onto the stages and are
+configurable per-run in `STATE.json.gate`.
+
+**Idle model.** For human gates the orchestrator **exits and persists** rather
+than holding a process for minutes/hours — idle cost is ~zero and an external
+trigger (`orchestra approve/resume`, or a future watcher) resumes it. For the
+*automated* B/C loop, idle = the orchestrator blocking on the in-flight
+`claude`/`codex` subprocess (also ~zero compute, bounded by the per-call timeout
+in §6).
 
 ## 6. CLI invocation reference
 
-The exact commands the orchestrator shells out to. These are the contract; if the
-CLIs change, update here first.
+The exact commands the orchestrator shells out to. **This is the contract; verify
+against the installed CLIs before building (flags marked ⚠️ need empirical
+confirmation).** Every invocation runs under a per-call subprocess **timeout**
+(`budget` / default 600s); a child that exceeds it is killed and the round is
+retried or escalated (§9, §10).
 
 ### Claude — author, planning stages (read-only; orchestrator owns the file)
 
 ```bash
 claude -p \
   --session-id "$(uuidgen)" \           # fresh session every call
-  --model claude-opus-4-8 \
-  --permission-mode plan \              # no edits; just produce the plan text
-  --output-format json \               # capture .result as the artifact
-  --append-system-prompt "$(cat prompts/claude/system.md)" \
+  --model opus \                        # alias, tracks latest Opus (pin only for reproducibility)
+  --output-format json \               # capture .result as the artifact text
+  --allowed-tools "Read Grep Glob" \    # ⚠️ read-only: author produces text, must not edit files
+  --append-system-prompt-file prompts/claude/system.md \
   < rendered_prompt.md
 # orchestrator writes the returned .result to 20-impl-plan.md
 ```
 
-For planning stages Claude stays read-only and its **stdout is the artifact** —
-the orchestrator persists it to the blackboard. This keeps the author from
-touching files it shouldn't and keeps the blackboard owned by one writer.
+For planning stages Claude stays read-only and its **stdout (`.result`) is the
+artifact** — the orchestrator persists it. ⚠️ **Do not** use `--permission-mode
+plan` here: in headless `-p` there is no interactive approver, so a plan-mode run
+can halt at the plan-approval boundary and return an ExitPlanMode/stop payload
+rather than clean Markdown. The read-only approach above (whitelist read tools so
+any Edit/Write is unavailable, capture `.result`) must be **empirically verified**
+to yield clean plan Markdown before it's trusted as the artifact (§13 open item).
 
 ### Claude — author, implementation stage (edit mode, isolated)
 
 ```bash
 claude -p \
   --session-id "$(uuidgen)" \
-  --model claude-opus-4-8 \
+  --model opus \
   --permission-mode acceptEdits \      # may edit files...
   --add-dir runs/<run>/30-impl \       # ...only inside the worktree
   --output-format json \
   < rendered_prompt.md
 ```
 
-Run inside a dedicated git worktree so parallel/iterative edits are isolated and
-the diff is clean for `codex review`.
+Run inside a dedicated git worktree so iterative edits are isolated and the diff
+is clean for review.
 
-### Codex — reviewer (prose + machine verdict)
+### Codex — reviewer, plan stages (prose + machine verdict)
 
 ```bash
 codex exec \
-  --model gpt-5-codex \                # or your configured reviewer model
-  --sandbox read-only \                # reviewer never mutates the workspace
   --skip-git-repo-check \
+  --sandbox read-only \                # reviewer never mutates the workspace
   --output-schema schemas/verdict.schema.json \   # forces JSON verdict shape
   --output-last-message runs/<run>/reviews/B-01-verdict.json \
+  [--model <id>] \                     # omit to use the operator's configured Codex default
   < rendered_review_prompt.md \
   > runs/<run>/reviews/B-01-review.md              # prose review on stdout
 ```
@@ -228,19 +313,36 @@ a clean JSON verdict without scraping prose.
 ### Codex — implementation review (native diff review)
 
 ```bash
-codex review --base <main-branch> \    # reviews the worktree diff vs base
-  --output-schema schemas/verdict.schema.json
-# (run with --uncommitted to include unstaged/untracked changes)
+codex exec review --base <main-branch> \           # the `review` SUBCOMMAND OF `exec`
+  --skip-git-repo-check \
+  --output-schema schemas/verdict.schema.json \
+  --output-last-message runs/<run>/reviews/C-01-verdict.json \
+  [--model <id>] \
+  < rendered_review_prompt.md \
+  > runs/<run>/reviews/C-01-review.md
+# (use `--uncommitted` instead of/with --base to include unstaged/untracked changes)
 ```
+
+> ⚠️ **Correctness note (fixed in v0.2):** the machine-verdict flags
+> (`--output-schema`, `--output-last-message`, `--model`) live on **`codex exec`**,
+> including its `review` subcommand — **not** on the bare `codex review` command,
+> which accepts only `-c/--config/--enable/--disable/--uncommitted/--base/--commit/--title`.
+> Likewise `--sandbox` is a `codex exec` flag; the `review` path relies on review
+> mode's intrinsic read-only behavior (or `-c sandbox_mode=...`). Re-verify exact
+> flag availability against your `codex --version` before building.
 
 ### Why these flags
 
 - `--session-id "$(uuidgen)"` — deterministic *fresh* sessions; independence.
-- `--permission-mode plan` (planning) vs `acceptEdits` + `--add-dir` (impl) —
-  least privilege per stage.
-- `--sandbox read-only` on the reviewer — a reviewer must never alter what it
-  reviews.
+- read-only author (planning) vs `acceptEdits` + `--add-dir` (impl) — least
+  privilege per stage.
+- `--sandbox read-only` on the `codex exec` reviewer — a reviewer must never alter
+  what it reviews.
 - `--output-schema` / `--output-last-message` — the self-termination contract.
+- `--model opus` (alias) for Claude and **omitting** `--model` for Codex — avoid
+  hardcoding ids that rot; pin only for reproducibility (§13).
+- `--append-system-prompt-file` (not `--append-system-prompt "$(cat …)"`) — avoids
+  argv-size and shell-quoting hazards. ⚠️ confirm the exact flag name.
 
 ## 7. The verdict contract
 
@@ -261,35 +363,64 @@ codex review --base <main-branch> \    # reviews the worktree diff vs base
 }
 ```
 
+**Structural invariant.** The schema uses an `allOf`/`if-then` so that `APPROVE`
+*requires* `blocking_issues` to be empty and `REVISE` *requires* at least one — a
+self-contradictory verdict fails validation outright. The orchestrator treats any
+verdict that is invalid, unparseable, or still inconsistent as an **error to
+re-prompt once, then escalate** (`stuck_reason = error`) — never as CONVERGED.
+
 Loop interpretation:
 
-- `APPROVE` → converged. `blocking_issues` must be empty.
-- `REVISE` → at least one `blocking_issue`; feed them (and only them) to the next
-  author round.
-- `REJECT` → fundamental flaw the reviewer believes iteration won't fix → escalate
-  to human immediately.
-- `addressed_previous` lets the orchestrator verify the author actually resolved
-  last round's issues (oscillation / regression detection).
+- `APPROVE` → converged (blocking_issues empty, guaranteed by schema). **Confidence
+  gate:** if `confidence` is below `cfg.min_confidence[stage]` (most relevant for
+  the `none`-gate Stage C), the APPROVE downgrades to `awaiting_human` instead of
+  auto-advancing. If you don't want this safeguard, set the threshold to 0; the
+  field then records confidence without gating.
+- `REVISE` → ≥1 `blocking_issue`; feed them (and the brief/plan) to the next author
+  round.
+- `REJECT` → fundamental flaw iteration won't fix → escalate immediately
+  (`stuck_reason = rejected`, distinct from a burned-out `max_rounds`).
+- `addressed_previous` lets the orchestrator check the author resolved last round's
+  issues; it is **validated against the actual prior verdict's ids** before being
+  trusted (a fresh reviewer can't be assumed to reuse ids — see §10).
 
 ## 8. State machine
 
+Every external call has a **persisted phase on both sides**, so a crash is always
+resumable to the right next action (not a re-run of completed work):
+
 ```
-            ┌──────────┐  author+review  ┌──────────┐
- init ─────▶│ running  │────────────────▶│ deciding │
-            └──────────┘                 └────┬─────┘
-                 ▲                            │
-   answers/      │            APPROVE+gate    │  REVISE (<max)
-   approve       │      ┌─────────────────────┼─────────────┐
-                 │      ▼                      ▼             ▼
-        ┌──────────────────┐         ┌──────────────┐  (loop back to running)
-        │  awaiting_human  │         │  converged   │
-        └──────────────────┘         └──────┬───────┘
-                 ▲                           │ advance stage / done
-       REJECT or max_rounds                  ▼
-            ┌─────────┐                  next stage … → done
-            │  stuck  │
-            └─────────┘
+            author in flight        artifact committed         review in flight
+  (enter)──▶ authoring ──────────▶ authored ──────────────▶ reviewing ──────┐
+     ▲           │  crash⇒retry        │  crash⇒review          │ crash⇒retry │
+     │           ▼                     ▼                        ▼             ▼
+     │        (error)              (error)                  (error)      deciding   ← last_verdict persisted
+     │                                                                       │
+ answers/iterate          ┌──────────── APPROVE+gate ───────────────────────┤
+ /approve/resume          │                          REVISE(<max) ──────────┼──▶ authoring (round+1)
+     │                    ▼                                                  │
+ ┌─────────────────┐  ┌───────────┐   gate∈{heavy,some}  ┌────────────────┐ │ REJECT / max_rounds /
+ │ awaiting_human  │◀─│ converged │──────────────────────│ awaiting_human │ │ budget / oscillation
+ │ waiting_for:    │  └─────┬─────┘   gate==none          │ (approval)     │ ▼
+ │  approval|answers│       │ advance stage (reset round & gate) / done    └─▶ stuck (stuck_reason)
+ └────────┬────────┘       ▼                                                       │
+          │            next stage … → done                                         │
+          └───────────────────────────────────◀── iterate --note / resume ─────────┘
 ```
+
+- `authoring`/`reviewing` are written **before** the respective subprocess call;
+  on resume the call is idempotently retried (the author overwrites the round's
+  draft; the reviewer re-reviews).
+- `authored` records the artifact path + content hash, so a crash before review
+  resumes at *review*, not a wasteful re-author.
+- `deciding` is written **after** review and **before** branching (with
+  `last_verdict`), so the branch decision is itself resumable.
+- `error` is reachable from any in-flight phase; `resume` performs an idempotent
+  retry of the failed invocation (bounded by §10 retry policy).
+- `stuck` carries `stuck_reason`. Human exit edges: `orchestra iterate --note`
+  (inject guidance, raise the cap if reason was `max_rounds`/`budget`, → back to
+  `authoring` at the recorded round so it doesn't instantly re-trip the cap) or
+  `resume` after the operator edits the blackboard.
 
 `STATE.json` (schema in `schemas/state.schema.json`):
 
@@ -297,90 +428,126 @@ Loop interpretation:
 {
   "run_id": "2026-06-13-todo-api",
   "created_at": "2026-06-13T10:00:00Z",
+  "updated_at": "2026-06-13T10:48:00Z",
+  "started_at": "2026-06-13T10:00:00Z",
   "stage": "impl_plan",
-  "status": "running",
+  "status": "deciding",
+  "waiting_for": null,
+  "stuck_reason": null,
   "round": 2,
   "gate": "some",
-  "config": { "max_rounds": { "highlevel": 6, "impl_plan": 4, "implementation": 5 } },
+  "current_step": "review",
+  "attempts": 0,
+  "tokens_spent": 41234,
+  "config": {
+    "max_rounds": { "highlevel": 6, "impl_plan": 4, "implementation": 5 },
+    "min_confidence": { "highlevel": 0, "impl_plan": 0, "implementation": 0.6 }
+  },
   "last_verdict": { "decision": "REVISE", "...": "..." },
-  "history": [
-    { "stage": "highlevel", "round": 1, "actor": "codex", "verdict": "APPROVE", "ts": "..." }
-  ]
+  "history": [ { "stage": "highlevel", "round": 1, "actor": "codex", "verdict": "APPROVE", "ts": "..." } ]
 }
 ```
 
-The orchestrator is restart-safe: kill it any time, re-run `orchestra resume <run>`,
-and it reconstructs intent from `STATE.json` + the files on disk.
+**Stage advance** atomically resets `round` to 0 and `gate` to the new stage's
+configured tier in the same STATE.json write.
 
-## 9. Orchestrator design (`orchestra.py`)
+## 9. Budgets, timeouts & enforcement
 
-Single Python file, stdlib-only (`subprocess`, `json`, `argparse`, `pathlib`,
-`uuid`, `datetime`). No third-party deps for v1.
+`max_rounds` bounds *iteration count*, not *cost*. Cost is bounded separately and
+mechanically:
 
-CLI surface:
-
-```
-orchestra init   <slug> [--brief FILE]     # create runs/<date>-<slug>/, write STATE.json
-orchestra run    <run>  [--stage A|B|C] [--interactive]   # drive the pipeline
-orchestra resume <run>                      # continue from STATE.json
-orchestra status <run>                      # print state + last verdict
-orchestra approve <run>                     # clear an approval gate, advance
-orchestra iterate <run> --note "..."        # force another round with a human note
-```
-
-Internal modules (functions, not files, in v1):
-
-- `cli` — argparse dispatch.
-- `state` — load/save `STATE.json`, transitions, history append.
-- `blackboard` — path helpers, render prompt templates with run context.
-- `claude` — build & run the `claude -p` invocations; parse `--output-format json`.
-- `codex` — build & run `codex exec` / `codex review`; read the verdict file.
-- `loop` — `run_stage` (the §4 algorithm), gate handling, oscillation guard.
+- **Token budget.** Token usage is read from `claude --output-format json` (its
+  `usage`) and Codex output, accumulated into `tokens_spent`, and checked at the
+  **top of every loop iteration and before every external call**. On breach →
+  `stuck(budget_exceeded)`.
+- **Wall-clock budget.** `started_at` + elapsed checked at the same points.
+- **Per-call timeout.** Every `claude`/`codex` subprocess runs under a timeout
+  (default 600s); a hung child is killed → retry/escalate.
+- 🔧 The *enforcement points* are fixed here; the accounting code is M1/M3.
+  `orchestra.example.toml` ships a **non-zero default budget** (not "unlimited"),
+  so a runaway is capped out of the box.
 
 ## 10. Failure modes & safeguards
 
+> The table states the *contract*. A 🔧 row's mechanism is a named milestone;
+> the rule is binding now.
+
 | Risk | Safeguard |
 |------|-----------|
-| **Loop runaway / cost blowup** | hard `max_rounds` per stage; global wall-clock + token budget cap; `--dry-run` to print commands without spending. |
-| **Oscillation / endless disagreement** | track `addressed_previous`; if issues don't shrink across 2 rounds, escalate to `stuck` early. |
-| **Cross-agent prompt injection** | one agent's output becomes another's input. Treat artifacts as *untrusted data*, not instructions: wrap them in clearly delimited blocks in prompts; reviewer runs `--sandbox read-only`; author runs least-privilege; never `--dangerously-bypass-*` by default. |
-| **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex review --base`. |
-| **Reviewer mutates workspace** | reviewer always `--sandbox read-only`. |
-| **CLI/API errors, rate limits** | bounded retries with backoff per invocation; on terminal failure set `status = error`, preserve blackboard, never corrupt `STATE.json` (write-temp-then-rename). |
-| **Non-determinism / flaky verdicts** | verdict is structured & logged; optional N-of-M reviewer vote for high-stakes gates (future). |
-| **Secrets leakage** | `.gitignore` excludes run contents by default; brief/plans may contain sensitive context — opt in to committing runs. |
-| **Stuck with no human around** | `status = stuck` is terminal-until-human; `orchestra status` surfaces it; future: notification hook. |
+| **Loop runaway / cost blowup** | hard `max_rounds` per stage **and** token + wall-clock budgets with defined check points (§9); `--dry-run` prints commands without spending. 🔧 |
+| **Oscillation / endless disagreement** | orchestrator-computed metric, **not** reviewer-chosen ids (a fresh reviewer emits fresh ids each round). The orchestrator derives a content key per blocking issue (normalized `location` + normalized `title`) and escalates to `stuck(oscillation)` when, over a 2-round window, the blocking-issue count does **not** strictly decrease **and** a prior issue's key recurs unchanged (the author claims a fix the reviewer keeps re-raising). The "fixed K, found 1 genuinely new" case (count flat but all keys new) does **not** trip it. `addressed_previous` is validated against the prior verdict's real ids before being trusted. 🔧 |
+| **Cross-agent prompt injection** | one agent's output is another's input. Artifacts (and code diffs, including comments/strings/tests) are **untrusted data**, wrapped in clearly delimited blocks; every author and reviewer prompt carries an untrusted-content clause; reviewer runs read-only; author runs least-privilege; never `--dangerously-bypass-*` by default. A reviewer's `suggested_fix` is a *proposal*, not a command the author must execute verbatim (§7, prompts). |
+| **Author edits outside scope (Stage C)** | `--add-dir` + worktree isolation; review is diff-scoped via `codex exec review --base`. |
+| **Reviewer mutates workspace** | reviewer always read-only (`codex exec --sandbox read-only`; review subcommand is intrinsically read-only). |
+| **"Tests pass" is self-attested** | 🔧 the **orchestrator** runs the plan's test command in the worktree and feeds the exit code + output into the review prompt as a trusted field; the reviewer only claims what it can verify by reading. Green tests are an *executed* gate, not a prose claim. |
+| **Self-contradictory verdict** | schema enforces APPROVE⟺no-blockers; inconsistent/invalid/unparseable verdict → re-prompt once → `stuck(error)`; never CONVERGED (§7). |
+| **Torn cross-file state on crash** | strict commit order: write artifact/verdict to temp → fsync → atomic rename into place → **then** atomic-rename the updated `STATE.json` that references them. STATE.json is never ahead of the files it points to. Round artifacts are **snapshotted** (`20-impl-plan.r2.md`), never overwritten in place, so a partial revise can't destroy the last-good version; "latest" is read from STATE.json, not by globbing. 🔧 |
+| **CLI/API errors, rate limits, bad verdict** | bounded retries with exponential backoff + jitter (default 3) on {timeout, rate-limit, transient subprocess failure, schema-invalid verdict}; fail-fast on {auth, not-found, config}. On terminal failure → `status = error`, blackboard preserved, STATE.json never corrupted (write-temp-then-rename). 🔧 |
+| **Secrets leakage** | `.gitignore` excludes run contents by default; briefs/plans may be sensitive — opt in to committing runs. |
+| **Stuck with no human around** | `stuck` is terminal-until-human and tagged with `stuck_reason`; `orchestra status` surfaces it and flags staleness via `updated_at`. 🔧 notification hook (see §12). |
+| **Hung vs working run** | the loop writes a `LOG.md` line on **entry and exit** of each invocation and bumps `updated_at`/`current_step`/`attempts`, so a tail distinguishes mid-call from hung; `orchestra status` flags a stale `updated_at`. 🔧 |
 
 ## 11. Configuration
 
 Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 (see `orchestra.example.toml`):
 
-- `models`: which Claude / Codex model per role.
-- `max_rounds`: per stage.
-- `sandbox` / `permission_mode`: per stage.
-- `budget`: wall-clock seconds and/or token ceiling per run.
-- `gate`: `heavy` / `some` / `none` per stage (defaults follow §2 table).
+- `models`: Claude alias / optional Codex id per role (omit Codex to use its
+  configured default).
+- `max_rounds`, `min_confidence`: per stage.
+- `budget`: wall-clock seconds, token ceiling, per-call timeout (non-zero
+  defaults).
+- `sandbox` / permission mode: per stage (least privilege).
+- `gate`: `heavy` / `some` / `none` per stage (defaults follow §2).
+- `behavior.fresh_author_on_revise`, `behavior.dry_run`.
 
 ## 12. Roadmap
 
-- **M1 — Loop engine (next pass).** Implement `run_stage` for one headless stage
-  (Stage B) end-to-end: author → Codex verdict → revise → converge. The smallest
-  thing that proves the contract.
-- **M2 — Full pipeline.** Wire Stage A (interactive + question round-trip) and
-  Stage C (worktree edit mode + `codex review`). Approval gates.
-- **M3 — Resilience.** Retries/backoff, budgets, oscillation guard, `--dry-run`.
-- **M4 — Observability.** Richer `LOG.md`, `orchestra status` dashboard, optional
-  notification on `awaiting_human` / `stuck`.
-- **M5 — Quality (optional).** N-of-M reviewer voting; swap reviewer/author models;
-  multi-reviewer perspectives.
+- **M1 — Loop engine + minimum safety kit.** Implement `run_stage` for one
+  headless stage (Stage B) end-to-end: author → schema-validated Codex verdict →
+  revise → converge. Ships *with* the non-negotiable safety basics: default
+  budget, per-call timeout, oscillation guard, atomic STATE.json commit,
+  `--dry-run`. The smallest thing that proves the contract — safely.
+- **M2 — Full pipeline.** Stage A (interactive + question round-trip + human
+  review note) and Stage C (worktree edit mode + orchestrator-run tests +
+  `codex exec review`). Approval gates, `waiting_for` discrimination.
+- **M3 — Resilience.** Retry/backoff, full budget accounting, per-round artifact
+  snapshots, error/resume edges, `stuck_reason` surfacing.
+- **M4 — Observability.** Heartbeat/`updated_at` staleness, richer `LOG.md`,
+  `orchestra status` dashboard, notification on `awaiting_human` / `stuck`.
+- **M5 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
+  models; multi-perspective reviewers.
 
 ## 13. Open questions
 
-- **Fresh vs resumed author in Stage C revisions** — fresh = independence but
-  re-reads the codebase each round (slower/costlier); resume = cheaper but carries
-  context. Default fresh; expose as a config knob.
-- **Where do runs live long-term** — committed to this repo, a sibling data repo,
-  or gitignored local-only? Default gitignored; revisit.
-- **Reviewer model** — confirm the exact Codex model id to standardize on.
+- **Planning-author capture (verify before M1).** Confirm empirically that a
+  read-only `claude -p ... --output-format json` reliably returns clean plan
+  Markdown in `.result` (and that `--permission-mode plan` is correctly *avoided*
+  in headless mode). The §6 invocation depends on this.
+- **Fresh vs resumed author on revision** — fresh = independence but re-reads each
+  round (slower/costlier); resume = cheaper but carries context. Default fresh
+  (`behavior.fresh_author_on_revise`). This applies to Stage B/C revisions **and**
+  to whether Stage A re-seeds a fresh interactive session per round vs continues
+  the conversation (current default: continuous within Stage A).
+- **Where runs live long-term** — committed here, a sibling data repo, or
+  gitignored local-only? Default gitignored; revisit.
+- **Codex model** — standardize via the operator's Codex default (don't hardcode);
+  document the recommended id once confirmed.
 - **PR automation in Stage C** — open a real PR via `gh`, or just present the diff?
+
+## Changelog
+
+- **v0.2** — hardened against a 5-lens multi-agent adversarial review of v0.1
+  (state-machine correctness, prompt-injection/trust boundaries, cost/operability,
+  fidelity to the intended workflow, and CLI-flag verification against ground-truth
+  `--help`). Notable fixes: corrected the Stage C Codex invocation to
+  `codex exec review` (the v0.1 `codex review --output-schema` is not a real flag
+  combination); made the APPROVE⟺no-blockers invariant structural in the schema;
+  added persisted intermediate states (`authoring`/`authored`/`reviewing`/
+  `deciding`) and `error` edges for unambiguous resume; redefined the oscillation
+  guard as an orchestrator-computed metric; replaced the unverified
+  `--permission-mode plan` capture assumption with a read-only-tools approach
+  flagged for verification; made budgets/timeouts mechanical; added an
+  orchestrator-run test gate for Stage C; standardized untrusted-content clauses
+  across prompts; de-hardcoded model ids.
+- **v0.1** — initial design.
