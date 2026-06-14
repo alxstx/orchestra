@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.4). This document is the spec. The orchestrator
+> Status: **design phase** (v0.5). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -316,19 +316,21 @@ claude -p \
   --session-id "$(uuidgen)" \           # fresh session every call
   --model opus \                        # alias, tracks latest Opus (pin only for reproducibility)
   --output-format json \               # capture .result as the artifact text
-  --allowed-tools "Read Grep Glob" \    # ⚠️ read-only: author produces text, must not edit files
+  --allowed-tools "Read Grep Glob" \    # read-only (verified): produces text, can't edit files
   --append-system-prompt-file prompts/claude/system.md \
   < rendered_prompt.md
 # orchestrator writes the returned .result to 20-impl-plan.md
 ```
 
 For planning stages Claude stays read-only and its **stdout (`.result`) is the
-artifact** — the orchestrator persists it. ⚠️ **Do not** use `--permission-mode
-plan` here: in headless `-p` there is no interactive approver, so a plan-mode run
-can halt at the plan-approval boundary and return an ExitPlanMode/stop payload
-rather than clean Markdown. The read-only approach above (whitelist read tools so
-any Edit/Write is unavailable, capture `.result`) must be **empirically verified**
-to yield clean plan Markdown before it's trusted as the artifact (§13 open item).
+artifact** — the orchestrator persists it. ✅ **Verified empirically** (2026-06-13,
+`claude 2.1.177`): the read-only invocation above returns clean plan Markdown in
+`.result` (`is_error:false`, `subtype:success`, 1 turn, no files written). **Do
+not** use `--permission-mode plan` here: tested headless, plan mode instead runs
+many turns, tries `AskUserQuestion`/`ExitPlanMode`, and leaves `.result` **empty** —
+the plan ends up trapped inside the `ExitPlanMode` tool-input plus a stray side-file
+under `~/.claude/plans/`. Token/cost accounting for the budget (§9) reads from the
+same JSON: `.usage.output_tokens` (+ cache fields) and `.total_cost_usd`.
 
 ### Claude — author, implementation stage (edit mode, isolated)
 
@@ -608,11 +610,16 @@ monitor can act *earlier* than a hard cap when something is clearly wrong, or
 A halt is always surfaced (the M4 notification hook); in `advisory` mode it can
 flag you without halting.
 
-**Realization (deferred).** It can run as a scheduled "cloud" agent (a routine /
-cron that wakes on the interval) or a local concurrent watchdog process; either way
-it's out-of-band from the loop. Keep its cadence modest and feed it summaries
-(`LOG.md`, `STATE.json`, latest verdicts) rather than full re-derivation, so
-oversight stays a small fraction of the run's cost (§13).
+**It's just a fresh Claude overseer.** Mechanically the monitor is the same as any
+other step: a fresh, read-only `claude -p` session (like the planning author)
+pointed at the run's blackboard, returning an assessment the orchestrator persists
+to `monitor/assessment.json`. The only real choice is *who launches it and when*:
+by default the **local orchestrator** spawns it on the interval / on triggers — no
+different from how it spawns the author and reviewer. Running it as a **scheduled
+cloud routine** only matters if you want oversight to keep going while your machine
+is off (a long unattended run on a server): same prompt, same role, just a remote
+wake-up. Keep its cadence modest and feed it summaries (`LOG.md`, `STATE.json`,
+latest verdicts), so oversight stays a small fraction of the run's cost.
 
 ## 11. Configuration
 
@@ -653,10 +660,11 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 
 ## 13. Open questions
 
-- **Planning-author capture (verify before M1).** Confirm empirically that a
-  read-only `claude -p ... --output-format json` reliably returns clean plan
-  Markdown in `.result` (and that `--permission-mode plan` is correctly *avoided*
-  in headless mode). The §6 invocation depends on this.
+- **Planning-author capture — RESOLVED (2026-06-13).** Verified: read-only
+  `claude -p --output-format json` returns clean plan Markdown in `.result`
+  (1 turn, no files written); `--permission-mode plan` is correctly *avoided*
+  (headless, it traps the plan in an `ExitPlanMode` tool-input and leaves
+  `.result` empty). See §6.
 - **Fresh vs resumed author on revision** — fresh = independence but re-reads each
   round (slower/costlier); resume = cheaper but carries context. Default fresh
   (`behavior.fresh_author_on_revise`). This applies to Stage B/C revisions **and**
@@ -667,12 +675,20 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 - **Codex model** — standardize via the operator's Codex default (don't hardcode);
   document the recommended id once confirmed.
 - **PR automation in Stage C** — open a real PR via `gh`, or just present the diff?
-- **Monitor realization** — a scheduled cloud agent (routine/cron) vs a local
-  concurrent watchdog; its wake cadence and the oversight-cost-vs-coverage
-  trade-off; whether `advisory` should be the default before trusting `enforcing`.
+- **Monitor cadence & default mode** — the overseer is just a fresh read-only
+  `claude` session; the open knobs are its wake cadence (cost vs coverage), whether
+  to launch it locally (default) or as a scheduled cloud routine for unattended
+  runs, and keeping `advisory` the default until its judgment is trusted enough for
+  `enforcing`.
 
 ## Changelog
 
+- **v0.5** — empirically verified the planning-author capture (§6): read-only
+  `claude -p --output-format json` returns clean plan Markdown in `.result`;
+  `--permission-mode plan` confirmed unsuitable headless (empties `.result`).
+  Confirmed token/cost fields for the budget. Clarified the monitor is *just a
+  fresh read-only Claude overseer* (local-spawned by default; cloud only for
+  unattended runs) — "cloud vs local" is a launch detail, not a design fork.
 - **v0.4** — added the supervisory **monitor** (§10.1): an optional concurrent
   overseer that judges run *health* (progress vs spinning, errors, semantic loops,
   spend-vs-progress), writes an accumulating health trail, and — only in enforcing
