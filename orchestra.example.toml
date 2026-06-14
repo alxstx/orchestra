@@ -51,6 +51,18 @@ wall_clock_seconds = 3600      # per run; 0 = unlimited (not recommended)
 tokens = 2000000               # per run; 0 = unlimited (not recommended)
 call_timeout_seconds = 600     # per claude/codex subprocess; a hung child is killed
 
+# Supervisory monitor (DESIGN §10.1): an optional concurrent overseer that judges
+# run HEALTH (not the artifact) and writes accumulating reports under monitor/.
+# It is single-writer-safe — it only writes monitor/; the orchestrator reads
+# monitor/HALT. Most of the time it should not intervene.
+[monitor]
+enabled = true
+mode = "advisory"              # off | advisory (report/warn only) | enforcing (may halt + flag)
+interval_seconds = 300         # how often the overseer wakes to assess
+stage_soft_timeout = 1800      # a stage running longer wakes the monitor to JUDGE (does NOT kill)
+intervene_min_confidence = 0.8 # enforcing mode: only halt on an 'intervene' at/above this confidence
+# model = "<judge-model>"      # optional; defaults to a capable judge model
+
 [behavior]
 fresh_author_on_revise = true  # true = fresh session each revise round (independence)
                                # false = resume author session (cheaper, carries context)

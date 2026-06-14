@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alxstx/orchestra/schemas/monitor.schema.json",
+  "title": "Monitor health assessment",
+  "description": "What the supervisory monitor writes to runs/<run>/monitor/assessment.json each time it wakes. The monitor judges the HEALTH OF THE RUN (process), not the artifact. It writes only under monitor/; the orchestrator reads this + monitor/HALT at its checkpoints and is the sole writer of STATE.json. See DESIGN §10.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assessment", "recommended_action", "progressing", "summary", "findings", "ts"],
+  "properties": {
+    "assessment": {
+      "type": "string",
+      "enum": ["healthy", "warning", "intervene"],
+      "description": "healthy = system working, continue. warning = something to surface but not halt. intervene = should be stopped (only acts in enforcing mode, above the confidence floor)."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence in the assessment. In enforcing mode, an 'intervene' only halts when confidence >= monitor.intervene_min_confidence."
+    },
+    "recommended_action": {
+      "type": "string",
+      "enum": ["continue", "warn_user", "halt"],
+      "description": "What the monitor recommends. Only 'halt' (in enforcing mode, above the confidence floor) writes monitor/HALT."
+    },
+    "halt_requested": {
+      "type": "boolean",
+      "description": "Mirror of whether monitor/HALT was written this cycle. The orchestrator treats the presence of monitor/HALT as authoritative."
+    },
+    "progressing": {
+      "type": "boolean",
+      "description": "Is the run making genuine progress (blockers trending down / stage advancing) vs spinning?"
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Snapshot the monitor read from the blackboard.",
+      "properties": {
+        "stage": { "type": "string" },
+        "round": { "type": "integer" },
+        "status": { "type": "string" },
+        "tokens_spent": { "type": "integer" },
+        "elapsed_seconds": { "type": "integer" }
+      }
+    },
+    "summary": { "type": "string", "description": "One-paragraph health summary for the human report." },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "detail"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+          "title": { "type": "string" },
+          "detail": { "type": "string" },
+          "evidence": { "type": "string", "description": "What in LOG.md / STATE.json / reviews supports this (e.g. 'issue at services.py:42 re-raised rounds 3,5,7')." }
+        }
+      }
+    },
+    "rationale": { "type": "string", "description": "Why this assessment — especially required when recommending halt." },
+    "ts": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "recommended_action": { "const": "halt" } }, "required": ["recommended_action"] },
+      "then": { "required": ["rationale"], "properties": { "assessment": { "const": "intervene" } } }
+    }
+  ]
+}

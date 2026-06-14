@@ -27,8 +27,8 @@
     },
     "stuck_reason": {
       "type": ["string", "null"],
-      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "error", null],
-      "description": "Set when status == stuck; lets orchestra status distinguish a cheap fundamental REJECT from an expensive burned-out loop. Null otherwise."
+      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "error", null],
+      "description": "Set when status == stuck; lets orchestra status distinguish a cheap fundamental REJECT from an expensive burned-out loop. 'monitor' = the supervisory overseer intercepted (DESIGN §10.1). Null otherwise."
     },
     "round": {
       "type": "integer",

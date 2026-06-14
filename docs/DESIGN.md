@@ -1,6 +1,6 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.3). This document is the spec. The orchestrator
+> Status: **design phase** (v0.4). This document is the spec. The orchestrator
 > (`orchestra.py`) is a non-functional skeleton until the loop engine is built
 > (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
 > the changelog at the end.
@@ -160,6 +160,10 @@ runs/<YYYY-MM-DD>-<slug>/
     B-01-review.md   B-01-verdict.json
     C-01-review.md   C-01-verdict.json   C-01-tests.txt  # captured test run for the round
     ...
+  monitor/                # written ONLY by the supervisory overseer (§10.1)
+    assessment.json       # latest health assessment (schemas/monitor.schema.json)
+    report-01.md ...      # accumulating human-readable health reports
+    HALT                  # presence = overseer requests a halt (enforcing mode)
 ```
 
 Naming: `<stage-letter>-<round:02d>-{review.md,verdict.json,...}`. Stages are
@@ -516,6 +520,11 @@ mechanically:
 - **Wall-clock budget.** `started_at` + elapsed checked at the same points.
 - **Per-call timeout.** Every `claude`/`codex` subprocess runs under a timeout
   (default 600s); a hung child is killed → retry/escalate.
+- **Soft stage/run time-budget.** A *separate, non-fatal* threshold: when a stage
+  (or the whole run) runs longer than its soft budget, the orchestrator kills
+  nothing — it **wakes the monitor** (§10.1) to judge whether the over-run is
+  benign ("slow but progressing") or wedged ("stop it"). The hard per-call timeout
+  handles hung *processes*; the soft budget handles suspicious *slowness*.
 - 🔧 The *enforcement points* are fixed here; the accounting code is M1/M3.
   `orchestra.example.toml` ships a **non-zero default budget** (not "unlimited"),
   so a runaway is capped out of the box. With the default 15-round ceiling (§4.1),
@@ -541,6 +550,69 @@ mechanically:
 | **Secrets leakage** | `.gitignore` excludes run contents by default; briefs/plans may be sensitive — opt in to committing runs. |
 | **Stuck with no human around** | `stuck` is terminal-until-human and tagged with `stuck_reason`; `orchestra status` surfaces it and flags staleness via `updated_at`. 🔧 notification hook (see §12). |
 | **Hung vs working run** | the loop writes a `LOG.md` line on **entry and exit** of each invocation and bumps `updated_at`/`current_step`/`attempts`, so a tail distinguishes mid-call from hung; `orchestra status` flags a stale `updated_at`. 🔧 |
+| **Subtle/semantic failure the static guards miss** | an optional concurrent **monitor** (§10.1) judges run *health* — real progress vs spinning, recurring errors, semantic loops, spend-vs-progress — and, in enforcing mode, can halt and flag you *earlier* than the hard caps, or judge an over-run benign and let it continue. Augments the mechanical floor; never replaces it. 🔧 |
+
+### 10.1 The monitor — a supervisory overseer
+
+The deterministic guards above (per-call timeout, the §4.1 round ceiling, budget
+caps, the oscillation metric) are the always-on *floor*: cheap, mechanical, dumb —
+they can't tell "slow but progressing" from "wedged," and they fire only at fixed
+thresholds. The **monitor** is an optional, concurrent *smart layer* on top: an
+independent agent that watches a run and judges whether the **system itself** is
+working — distinct from Codex, which judges the *artifact*. It is an LLM-as-judge
+over the *process*. Most of the time it should conclude "healthy, continue";
+occasionally it should step in.
+
+**Independence & single-writer safety.** The monitor is itself a **fresh session**
+each time it wakes — it never shares the author's or reviewer's context; it reads
+their output as data. It reads the whole blackboard (`STATE.json`, `LOG.md`,
+`reviews/`, prior monitor reports) but **writes only under `monitor/`**. The
+orchestrator stays the sole writer of `STATE.json` (preserving the §10
+single-writer / commit-order discipline) and simply **reads `monitor/HALT` +
+`monitor/assessment.json` at its safe checkpoints** (top of the loop and before
+each external call — the same points as the budget checks).
+
+**When it wakes.** Periodically (`monitor.interval_seconds`) and/or on events: a
+call that blew the hard timeout, a stage past its **soft time-budget** (§9), N
+consecutive errors, budget crossing a threshold, accumulating oscillation
+warnings, or a stale `updated_at` (a hung run). This is the real answer to "when
+it's running longer than expected" — a soft over-run wakes a *judge*; it doesn't
+blindly kill.
+
+**What it judges (rubric).** Is the run making *genuine progress* (blocking issues
+trending down, stage advancing) or spinning? Recurring errors/retries? Hung (stale
+heartbeat)? A *semantic* loop the content metric can't catch (the reviewer
+re-raising the same concern in new words; the author misreading the brief)? Spend
+disproportionate to progress? Is a long run benign or wedged?
+
+**Output → an auditable health trail.** Each wake it updates
+`monitor/assessment.json` (schema: `schemas/monitor.schema.json`) and, at least on
+any `warning`/`intervene`, writes a human-readable `monitor/report-NN.md`. These
+accumulate, so you can answer "is the system working correctly?" at a glance —
+exactly the report you asked for.
+
+**Authority tiers (`monitor.mode`)** — calibrated so it rarely acts:
+- `off` — no monitor.
+- `advisory` (default) — observes, writes reports, raises warnings to you, but
+  **never halts**; the run continues. Good for building trust in its judgment.
+- `enforcing` (the "harder" setting) — may **intercept**. When it returns
+  `intervene` with confidence ≥ `monitor.intervene_min_confidence`, it writes
+  `monitor/HALT` (+ assessment + rationale); at its next checkpoint the
+  orchestrator records `stuck(reason="monitor")`, persists the rationale, and
+  **flags you**. It does *not* act on `healthy`/`warning` — "most times it should
+  not; in some cases it should."
+
+**It augments, never replaces, the floor.** The mechanical guards still run; the
+monitor can act *earlier* than a hard cap when something is clearly wrong, or
+*hold back* and let a benign over-run finish — judgment the static caps can't make.
+A halt is always surfaced (the M4 notification hook); in `advisory` mode it can
+flag you without halting.
+
+**Realization (deferred).** It can run as a scheduled "cloud" agent (a routine /
+cron that wakes on the interval) or a local concurrent watchdog process; either way
+it's out-of-band from the loop. Keep its cadence modest and feed it summaries
+(`LOG.md`, `STATE.json`, latest verdicts) rather than full re-derivation, so
+oversight stays a small fraction of the run's cost (§13).
 
 ## 11. Configuration
 
@@ -556,6 +628,8 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 - `gate`: `heavy` / `some` / `none` per stage (defaults follow §2).
 - `behavior.fresh_author_on_revise`, `behavior.stop_on_oscillation`,
   `behavior.dry_run`.
+- `monitor`: `enabled`, `mode` (`off`/`advisory`/`enforcing`), `interval_seconds`,
+  `stage_soft_timeout`, `intervene_min_confidence`, `model` (§10.1).
 
 ## 12. Roadmap
 
@@ -571,7 +645,10 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   snapshots, error/resume edges, `stuck_reason` surfacing.
 - **M4 — Observability.** Heartbeat/`updated_at` staleness, richer `LOG.md`,
   `orchestra status` dashboard, notification on `awaiting_human` / `stuck`.
-- **M5 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
+- **M5 — Supervisory monitor (§10.1).** Advisory first (concurrent health reports
+  + warnings, no halting), then enforcing (intercept on high-confidence `intervene`
+  → halt + flag). Soft time-budget trigger; `stuck_reason = monitor`.
+- **M6 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
   models; multi-perspective reviewers.
 
 ## 13. Open questions
@@ -590,9 +667,20 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 - **Codex model** — standardize via the operator's Codex default (don't hardcode);
   document the recommended id once confirmed.
 - **PR automation in Stage C** — open a real PR via `gh`, or just present the diff?
+- **Monitor realization** — a scheduled cloud agent (routine/cron) vs a local
+  concurrent watchdog; its wake cadence and the oversight-cost-vs-coverage
+  trade-off; whether `advisory` should be the default before trusting `enforcing`.
 
 ## Changelog
 
+- **v0.4** — added the supervisory **monitor** (§10.1): an optional concurrent
+  overseer that judges run *health* (progress vs spinning, errors, semantic loops,
+  spend-vs-progress), writes an accumulating health trail, and — only in enforcing
+  mode, on a high-confidence call — can intercept, halt, and flag the user.
+  Single-writer-safe (writes only under `monitor/`; the orchestrator reads
+  `monitor/HALT`). Added a soft stage/run time-budget that wakes the monitor
+  instead of killing (§9), `stuck_reason = monitor`, `[monitor]` config, and
+  `schemas/monitor.schema.json`.
 - **v0.3** — added the convergence ceiling & settle rules (§4.1): a hard per-stage
   round ceiling (default 15) with explicit terminal behavior — APPROVE (clean or
   with nits) settles immediately and carries nits forward; hitting the ceiling
