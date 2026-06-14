@@ -56,8 +56,10 @@ def claude_generate(prompt: str, *, edit_dir: Path | None = None) -> str:
         --permission-mode plan, which is an interactive-approval primitive that
         can halt headless runs at the plan boundary (DESIGN §6 ⚠️ / §13).
     Implementation: --permission-mode acceptEdits --add-dir <edit_dir>.
-    Always --session-id $(uuid4) for a fresh session. Runs under the per-call
-    timeout from config.budget.call_timeout_seconds.
+    Always --session-id $(uuid4) for a fresh session, plus the isolation profile
+    (--bare/--safe-mode, --setting-sources "", --strict-mcp-config,
+    --no-session-persistence, minimal cwd) so only the blackboard carries state
+    (DESIGN §6.1). Runs under config.budget.call_timeout_seconds.
     """
     raise NotImplementedError("M1")
 
@@ -68,14 +70,19 @@ def claude_generate(prompt: str, *, edit_dir: Path | None = None) -> str:
 def codex_review(prompt: str, *, verdict_path: Path, diff_base: str | None = None) -> dict:
     """Run a fresh Codex review and return the schema-validated verdict.
 
-    Plan stages: `codex exec --sandbox read-only --output-schema
-        schemas/verdict.schema.json --output-last-message <verdict_path>`.
-    Implementation (diff_base set): `codex exec review --base <diff_base>
-        --output-schema ... --output-last-message ...` — the verdict flags live
-        on `codex exec`/its `review` subcommand, NOT on bare `codex review`
-        (DESIGN §6). The review subcommand is intrinsically read-only.
-    Validates the result against verdict.schema.json; an invalid/inconsistent
-    verdict is re-prompted once, then escalated (never treated as CONVERGED).
+    Plan stages: `codex exec - --sandbox read-only --ignore-user-config
+        --ignore-rules --ephemeral --output-schema schemas/verdict.schema.json
+        --output-last-message <verdict_path> < prompt` (`-` reads the prompt from
+        stdin; isolation per §6.1).
+    Implementation (diff_base set): `codex exec review - --uncommitted --base
+        <diff_base> --output-schema ... -o ...` — verdict flags live on `codex
+        exec`/its `review` subcommand; the review `[PROMPT]` reads stdin only with
+        `-`; `--uncommitted` captures Claude's worktree diff that `--base` alone
+        may miss (DESIGN §6). The review subcommand is intrinsically read-only.
+    Reads the verdict from <verdict_path> (NOT stdout — stdout is JSON, not prose;
+        the human review is verdict.review_markdown, rendered to review.md).
+    Validates against verdict.schema.json; an invalid/inconsistent verdict is
+        re-prompted once, then escalated (never treated as CONVERGED).
     """
     raise NotImplementedError("M1")
 
@@ -84,9 +91,21 @@ def codex_review(prompt: str, *, verdict_path: Path, diff_base: str | None = Non
 # loop — the convergence algorithm (DESIGN §4) + gates (DESIGN §5)
 # --------------------------------------------------------------------------- #
 def run_stage(run_dir: Path, stage: str) -> str:
-    """author_generate -> [codex_review -> decide -> author_revise]* until
-    APPROVE / REJECT / max_rounds. Returns one of: converged | stuck.
-    Honors the stage's gate (heavy/some/none) and the oscillation guard.
+    """author -> [review -> decide -> revise]* until APPROVE / REJECT / max_rounds.
+    Returns one of: converged | stuck. Honors the stage's gate (heavy/some/none),
+    the §4.1 ceiling, and the oscillation guard. Entered via resume() (below),
+    which DISPATCHES ON (stage, status) — not round — so a crash at `deciding`
+    re-branches from last_verdict instead of re-reviewing (DESIGN §4, §8).
+    """
+    raise NotImplementedError("M1")
+
+
+def resume(run_dir: Path) -> str:
+    """Dispatch on STATE.json.status to the correct next action (DESIGN §8):
+    authoring->author, authored/reviewing->review, deciding->decide(last_verdict),
+    awaiting_human->await(waiting_for), converged->advance_stage,
+    stuck/error/done->terminal. The orchestrator is a pure function of the
+    blackboard; every status carries the fields resume needs (state.schema allOf).
     """
     raise NotImplementedError("M1")
 

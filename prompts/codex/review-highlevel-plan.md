@@ -27,11 +27,13 @@ unrealistic assumptions, wrong altitude (too much/too little detail for a
 high-level plan), and internal contradictions. Do **not** nitpick wording or
 demand implementation detail — that comes later.
 
-First write a concise prose review (your stdout). Then emit your final message as
-JSON conforming exactly to the verdict schema:
+Emit your final message as JSON conforming exactly to the verdict schema — this is
+the only output channel; there is no separate stdout review. Put the full
+human-readable review in `review_markdown`, a one-paragraph digest in `summary`,
+and a calibrated `confidence` (0–1):
 - `APPROVE` only if there are zero blocking issues.
 - `REVISE` if the author should iterate; put every must-fix item in
-  `blocking_issues` with id, severity, location, and a concrete `suggested_fix`.
-- `REJECT` only for a fundamental, iteration-resistant flaw that should be
-  redone rather than patched.
+  `blocking_issues` with id, severity, `location`, and a concrete `suggested_fix`.
+- `REJECT` only for a fundamental, iteration-resistant flaw that should be redone
+  rather than patched — give a `reject_reason`.
 - List any prior-round issues you judge resolved in `addressed_previous`.

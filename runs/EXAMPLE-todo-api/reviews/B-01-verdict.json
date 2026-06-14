@@ -1,6 +1,7 @@
 {
   "decision": "REVISE",
   "confidence": 0.78,
+  "review_markdown": "## Review — implementation plan (round 1)\n\nThe structure is sound and the work breakdown is mostly buildable, but two gaps would force the implementer to improvise decisions the plan should make.\n\n**Blocking**\n- **B1 (atomic writes):** the store is written in place; a crash mid-write corrupts all todos. Write to a temp file and `os.replace()`.\n- **B2 (error responses):** 404/400 behavior is undefined, so the build will invent it. Specify the error envelope and status codes.\n\n**Non-blocking**\n- N1: consider noting pagination as a future concern for the list endpoint.",
   "summary": "Solid structure, but two gaps block a clean build: durability of the on-disk store under concurrent writes, and unspecified error responses.",
   "blocking_issues": [
     {

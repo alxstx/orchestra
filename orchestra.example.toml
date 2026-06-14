@@ -44,6 +44,18 @@ author_impl = "acceptEdits"    # implementation: edits confined to the worktree 
 # read-only (no --sandbox flag there).
 reviewer = "read-only"
 
+# Strip ambient context so the blackboard is the ONLY channel (DESIGN §6.1).
+# Fresh sessions stop conversation carryover; these stop config/hooks/MCP/rules
+# leakage and make runs reproducible.
+[isolation]
+claude_bare = true               # --bare: skip hooks/LSP/plugins (or use --safe-mode)
+claude_setting_sources = ""      # --setting-sources "": load no user/project/local settings
+claude_strict_mcp = true         # --strict-mcp-config: ignore ambient MCP servers
+claude_no_session_persistence = true  # --no-session-persistence
+codex_ignore_user_config = true  # --ignore-user-config
+codex_ignore_rules = true        # --ignore-rules
+codex_ephemeral = true           # --ephemeral: don't persist session files
+
 # Cost is bounded mechanically, independent of max_rounds (which only bounds
 # iteration count). Non-zero defaults so a runaway is capped out of the box.
 [budget]

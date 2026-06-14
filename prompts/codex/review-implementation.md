@@ -42,12 +42,15 @@ Review for, in priority order:
 Be specific: cite file and line. Distinguish must-fix (`blocking_issues`) from
 nice-to-have (`non_blocking_suggestions`). Do not block on pure style.
 
-Emit your final message as JSON conforming to the verdict schema:
+Emit your final message as JSON conforming to the verdict schema — the only output
+channel; there is no separate stdout review. Put the full human-readable review in
+`review_markdown`, a one-paragraph digest in `summary`, and a calibrated
+`confidence` (0–1):
 - `APPROVE` only if the diff correctly and completely implements the plan, the
   trusted `<test_results>` show the suite passing, and there are zero blocking
   issues.
 - `REVISE` otherwise; each must-fix item in `blocking_issues` (id, severity,
-  file:line, concrete `suggested_fix`).
-- `REJECT` only if the diff is fundamentally wrong and should be redone rather
-  than patched.
+  `location` as file:line, concrete `suggested_fix`).
+- `REJECT` only if the diff is fundamentally wrong and should be redone rather than
+  patched — give a `reject_reason`.
 - List any prior-round issues you judge resolved in `addressed_previous`.

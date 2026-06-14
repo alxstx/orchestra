@@ -21,6 +21,7 @@
   "last_verdict": {
     "decision": "APPROVE",
     "confidence": 0.82,
+    "review_markdown": "## Review — implementation plan (round 2)\n\nBoth round-1 blockers are resolved: writes are now atomic (temp + `os.replace()`), and the error envelope with 404/400 codes is specified. The plan is complete and buildable.",
     "summary": "The implementation plan is complete and buildable. Round-1 concerns about storage durability and error handling are resolved.",
     "blocking_issues": [],
     "non_blocking_suggestions": [

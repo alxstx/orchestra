@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alxstx/orchestra/schemas/state.schema.json",
   "title": "Orchestra run state",
-  "description": "STATE.json — the single source of truth AND the commit point for a run. Written last and atomically (DESIGN §10). The orchestrator is a pure function of this file plus the blackboard. Every external call has a persisted phase on both sides so any crash resumes to the correct next action.",
+  "description": "STATE.json — the single source of truth AND the commit point for a run. Written last and atomically (DESIGN §10). The orchestrator is a pure function of this file plus the blackboard; resume DISPATCHES ON (stage, status), not on round alone (DESIGN §8). Every external call has a persisted phase on both sides, and the allOf enforces the per-status invariants resume relies on.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["run_id", "created_at", "updated_at", "stage", "status", "round", "gate", "config"],
+  "required": ["run_id", "created_at", "updated_at", "stage", "status", "round", "gate", "config", "history"],
   "properties": {
     "run_id": { "type": "string", "description": "e.g. 2026-06-13-todo-api" },
     "created_at": { "type": "string", "format": "date-time" },
@@ -18,27 +18,38 @@
     "status": {
       "type": "string",
       "enum": ["authoring", "authored", "reviewing", "deciding", "awaiting_human", "converged", "stuck", "error", "done"],
-      "description": "Persisted phase. authoring/reviewing are written BEFORE the subprocess call (idempotent retry on resume). authored records artifact written/pending review. deciding is written after review with last_verdict, before branching. See DESIGN §8."
+      "description": "Persisted phase; resume dispatches on (stage, status). authoring/reviewing written BEFORE the subprocess call (idempotent retry on resume). authored = artifact committed, review pending. deciding = written after review with last_verdict, before branching (resume re-evaluates the branch from last_verdict — e.g. a REVISE goes to author_revise, NOT another review). See DESIGN §8."
     },
     "waiting_for": {
       "type": ["string", "null"],
       "enum": ["approval", "answers", null],
-      "description": "Discriminator when status == awaiting_human: are we blocked on a human approval/iterate decision, or on answers.md? Null otherwise."
+      "description": "Discriminator when status == awaiting_human (required + non-null then): approval gate vs answers.md round-trip. Null otherwise."
     },
     "stuck_reason": {
       "type": ["string", "null"],
       "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "error", null],
-      "description": "Set when status == stuck; lets orchestra status distinguish a cheap fundamental REJECT from an expensive burned-out loop. 'monitor' = the supervisory overseer intercepted (DESIGN §10.1). Null otherwise."
+      "description": "Required + non-null when status == stuck. 'monitor' = the supervisory overseer intercepted (DESIGN §10.1). Null otherwise."
     },
     "round": {
       "type": "integer",
       "minimum": 0,
-      "description": "Per-stage, resets to 0 on stage entry. Round 0 = initial author draft (pre-review). Round k (>=1) = the k-th review + the revise that produced the reviewed artifact. On resume, derived from history's max round for the current stage."
+      "description": "Per-stage, resets to 0 on stage entry. Round 0 = initial author draft (pre-review). Round k (>=1) = the k-th review + the revise that produced the reviewed artifact. On resume, derived from history's max round for the current stage; round alone never decides the next action — status does."
     },
     "gate": {
       "type": "string",
       "enum": ["heavy", "some", "none"],
       "description": "Human-in-loop level for the current stage. Reset to the new stage's configured tier on stage advance."
+    },
+    "current_artifact": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "The artifact this stage/round is acting on. Required (non-null) for authored/reviewing/deciding so resume knows what was committed and can verify it. Null before the first draft.",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the current round's artifact snapshot, e.g. 20-impl-plan.r1.md." },
+        "hash": { "type": "string", "description": "Content hash recorded at 'authored'; resume verifies the committed draft matches." },
+        "verdict_path": { "type": ["string", "null"], "description": "Path to the round's verdict JSON once reviewed (set by 'deciding')." }
+      },
+      "required": ["path", "hash"]
     },
     "current_step": {
       "type": ["string", "null"],
@@ -53,7 +64,7 @@
     "tokens_spent": {
       "type": "integer",
       "minimum": 0,
-      "description": "Accumulated output tokens (Claude usage + Codex); checked against config.budget.tokens (DESIGN §9)."
+      "description": "Accumulated output tokens. Claude side from .usage.output_tokens; Codex side best-effort from --json events, else bounded by wall-clock/timeout/max_rounds (DESIGN §9)."
     },
     "config": {
       "type": "object",
@@ -98,11 +109,12 @@
       }
     },
     "last_verdict": {
-      "description": "The most recent verdict object (see verdict.schema.json), or null.",
+      "description": "The most recent verdict object (see verdict.schema.json), or null. Required (non-null) when status == deciding.",
       "type": ["object", "null"]
     },
     "history": {
       "type": "array",
+      "description": "Append-only event log; resume derives the current round from it.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -113,11 +125,29 @@
           "actor": { "type": "string", "enum": ["claude", "codex", "human", "orchestrator"] },
           "verdict": { "type": "string" },
           "artifact": { "type": "string", "description": "Path to the round's artifact snapshot." },
-          "artifact_hash": { "type": "string", "description": "Content hash recorded at 'authored', so resume knows the draft is committed." },
+          "artifact_hash": { "type": "string" },
           "note": { "type": "string" },
           "ts": { "type": "string", "format": "date-time" }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["authored", "reviewing", "deciding"] } }, "required": ["status"] },
+      "then": { "required": ["current_artifact"], "properties": { "current_artifact": { "type": "object" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "deciding" } }, "required": ["status"] },
+      "then": { "required": ["last_verdict"], "properties": { "last_verdict": { "type": "object" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "awaiting_human" } }, "required": ["status"] },
+      "then": { "required": ["waiting_for"], "properties": { "waiting_for": { "type": "string", "enum": ["approval", "answers"] } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "stuck" } }, "required": ["status"] },
+      "then": { "required": ["stuck_reason"], "properties": { "stuck_reason": { "type": "string" } } }
+    }
+  ]
 }
