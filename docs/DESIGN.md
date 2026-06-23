@@ -1,9 +1,10 @@
 # Orchestra — Design
 
-> Status: **design phase** (v0.10). This document is the spec. The orchestrator
-> (`orchestra.py`) is a non-functional skeleton until the loop engine is built
-> (milestone M1). v0.2 folds in a multi-agent adversarial review of v0.1 — see
-> the changelog at the end.
+> Status: **design phase** (v0.11). This document is the spec. v0.11 **folds in the
+> review charter (§2.1) and Stage T — the optional acceptance-test phase** — at the
+> load-bearing points (§2, §3, §5, §8, §10.1, §11, §12); the full Stage T mechanism is
+> the companion spec **`docs/STAGE-T-test-phase.md`** (v0.23). v0.2 folds in a
+> multi-agent adversarial review of v0.1 — see the changelog at the end.
 >
 > Throughout, a 🔧 marks a rule whose *contract* is fixed here now but whose
 > *implementation* is a named build milestone.
@@ -68,20 +69,45 @@ state, no conversation memory leaking between author and reviewer — just files
 ## 2. The pipeline
 
 ```
- brief ─▶ Stage A: high-level plan ─▶ Stage B: implementation plan ─▶ Stage C: implementation
-          (HEAVY human-in-loop)        (SOME human-in-loop)            (AUTONOMOUS)
-          interactive Claude            auto Claude⇄Codex loop          auto Claude⇄Codex loop
-          + headless Codex review       + human approval gate           + final human review
+ brief ─▶ A: high-level plan ─▶ B: impl plan ─▶ Tp: test plan ─▶ Tt: acceptance tests ─▶ C: implementation
+          (HEAVY HITL)           (SOME HITL)      (SOME HITL)       (none)                 (AUTONOMOUS)
+          interactive Claude      auto loop        auto loop         auto loop, frozen      auto loop, gated by
+          + headless Codex        + approval gate  + approval gate   into Stage C's gate    the frozen tests
 ```
 
 Each stage is the same primitive — **author → review → decide** — but with a
-different automation level and a different exit gate.
+different automation level and a different exit gate. **Stages Tp/Tt are the
+optional acceptance-test phase ("Stage T", `[stage_t].enabled`)** that authors and
+freezes an independent test suite *before* implementation, so Stage C is graded by
+tests it did not write (closing the greenfield self-attestation hole) and is given
+the contract but not the hidden cases (anti-overfitting). **The full Stage T spec
+is `docs/STAGE-T-test-phase.md`; this doc integrates it at the load-bearing points
+(§2.1, §3, §5, §8, §10.1, §11, §12).**
 
 | Stage | Artifact | Author | Reviewer | Loop | Human gate |
 |-------|----------|--------|----------|------|------------|
-| A. High-level plan | `10-highlevel-plan.md` | interactive Claude (Q&A) | headless `codex exec` | human-driven rounds | **heavy** — you approve every round & advance |
-| B. Implementation plan | `20-impl-plan.md` | headless Claude | headless `codex exec` | auto until APPROVE / max-rounds | **some** — you approve the converged plan before C |
-| C. Implementation | `30-impl/` (a diff) | headless Claude (edit mode) | headless `codex exec review` | auto until APPROVE / max-rounds | **none** until the end — you review the final diff/PR |
+| A. High-level plan | `10-highlevel-plan.md` | interactive Claude (Q&A) | headless `codex exec` | human-driven rounds | **heavy** — you approve every round & advance; **the review charter is elicited here** (§2.1) |
+| B. Implementation plan | `20-impl-plan.md` | headless Claude | headless `codex exec` | auto until APPROVE / max-rounds | **some** — you approve the converged plan before T/C |
+| Tp. Test plan *(opt.)* | `25-test-plan.md` + `25-interface.json` + `25-acceptance-contract.json` | headless Claude (plan-author, multi-section stdout) | headless `codex exec` | auto until APPROVE | **some** — approve the coverage map + contract |
+| Tt. Acceptance tests *(opt.)* | `28-tests/` (frozen suite) | headless Claude (edit mode) | headless `codex exec` (execution-grounded) | auto until APPROVE → **freeze** | **none** (escalates on degraded evidence) |
+| C. Implementation | `30-impl/` (a diff) | headless Claude (edit mode) | headless `codex exec` (impl-only diff) | auto until green frozen gate / max-rounds | **none** until the end — you review the final diff/PR |
+
+### 2.1 The review charter (anchors every review to project intent)
+
+A reviewer optimizes whatever objective it is given; unanchored it drifts to the
+most *escalatable* axis (e.g. adversarial security on a benign local project). So
+every run carries a **review charter** — a short, human-owned statement of the
+**operating/threat model, ranked priorities, explicit non-goals, and blocking
+bar** — **elicited during Stage A** (the heavy-HITL conversation: if the human
+hasn't stated it, the author proposes defaults from the brief and asks them to
+confirm/adjust via the `QUESTIONS` round-trip), finalized at the A gate, and stored
+as `05-charter.md` (human-owned, amendable). It is **prompt-level, tier-2 context
+passed to every reviewer, author/reviser, and the monitor**; reviewers raise
+out-of-scope observations as **nits, never blockers** (so `consistent()` is
+unchanged and there is no fragile `out_of_charter` verdict field). The charter
+**demotes, it does not forbid** — a genuinely important out-of-scope finding is
+still surfaced as a nit and the human can act on it. The brief says *what to build*;
+the charter says *what the reviewer should optimize and what is out of scope*.
 
 **Freshness vs principle 1.** Cross-stage and author/reviewer boundaries are
 always fresh, so each of {high-level plan, impl plan, implementation} is its own
@@ -166,21 +192,36 @@ runs/<YYYY-MM-DD>-<slug>/
   .lock                 # exclusive run lock (flock/pidfile) — one orchestrator at a time (§8)
   LOG.md                # human-readable transcript (human-facing only; not fed to agents)
   00-brief.md           # your seed: what the project is
+  05-charter.md         # the review charter (§2.1) — elicited in Stage A, tier-2 context for every review
   10-highlevel-plan.md  # Stage A output (current); per-round snapshots 10-highlevel-plan.rNN.md
   20-impl-plan.md       # Stage B output (current); per-round snapshots 20-impl-plan.rNN.md
-  30-impl/              # Stage C: greenfield = standalone repo here; brownfield = a POINTER to a worktree in the user's target repo (§6)
+  25-test-plan.md       # Stage Tp: coverage map (opt., [stage_t].enabled)
+  25-interface.json     # Stage Tp: interface manifest (public surface + per-entry probe)
+  25-acceptance-contract.json  # Stage Tp: visible normative contract + visibility policy (Stage T doc §2)
+  28-tests/             # Stage Tt: the frozen acceptance suite — visible/ + hidden/ + lib/ roots
+  28-tests-manifest.json  28-cases.json  28-visibility-closure.json   # frozen test/case/closure manifests
+  30-impl/              # Stage C: greenfield = standalone repo (SEEDED FROM tt_commit when Stage T on); brownfield = POINTER (§6)
   questions.md          # Claude → human (clarifying questions), when paused
   answers.md            # human → Claude (your answers)
   reviews/
     A-01-review.md   A-01-verdict.json   A-01-human.md   # human review note (optional)
     B-01-review.md   B-01-verdict.json
-    C-01-review.md   C-01-verdict.json   C-01-tests.txt  # captured test run for the round
+    Tp-01-review.md  Tp-01-verdict.json
+    Tt-01-review.md  Tt-01-verdict.json  Tt-01-report.xml  Tt-01-tests.txt  # canonical report + bounded log
+    C-01-review.md   C-01-verdict.json   C-01-report.xml   C-01-tests.txt
     ...
   monitor/                # written ONLY by the supervisory overseer (§10.1)
     assessment.json       # latest health assessment (schemas/monitor.schema.json)
     report-01.md ...      # accumulating human-readable health reports
     HALT                  # presence = overseer requests a halt (enforcing mode)
 ```
+
+> **Stage T curated-context (anti-overfitting):** the Stage C author is given
+> `25-acceptance-contract.json` (the full contract) + a *policy-bounded* set of
+> **visible** example cases, but **not** the hidden cases; the hidden grader returns
+> only **redacted `{contract_item_id, status}`** feedback. Stage T (Tp/Tt) authoring
+> still runs under the §6.1 isolation profile — Tp is a `--tools ""` plan-author that
+> emits a single multi-section stdout the orchestrator splits (see the Stage T doc §2).
 
 Naming: `<stage-letter>-<round:02d>-{review.md,verdict.json,...}`. Stages are
 `A`/`B`/`C`; rounds are 1-based per stage (see "Round semantics" in §4).
@@ -797,7 +838,22 @@ resumable to the right next action (not a re-run of completed work):
 ```
 
 **Stage advance** atomically resets `round` to 0 and `gate` to the new stage's
-configured tier in the same STATE.json write.
+configured tier in the same STATE.json write. **Routing is config-pinned:** the
+next stage is computed from `STATE.config` (not live `orchestra.toml`), so toggling
+`[stage_t].enabled` mid-run can't reshape an in-flight pipeline.
+
+**Stage T additions (when `[stage_t].enabled`; see `docs/STAGE-T-test-phase.md` §10).**
+The `stage` enum gains `test_plan` and `tests`; `current_artifact` becomes typed
+(`{kind: file|tree, path, hash, commit}`) so an `edit`-mode stage (Tt, like C) can
+carry a tree/commit rather than one file; `history` items gain `suite_epoch` (so round
+derivation stays correct across an amendment re-freeze). New `waiting_for = test_dispute`;
+new `stuck_reason ∈ {amendment_conflict, tests_failed, composition_failed}`; a nested
+`amending` status (`amend.{active, subrun, phase, saved_stage_c}`); and an `operation`
+model `{kind, phase, suite_epoch, input_digests, output_paths, completed_marker}` with an
+idempotence table for the side-effecting non-LLM steps (provision/freeze/compose/
+final_gate). The executed-test gate is a stage-aware **`test_gate_ok()`** predicate kept
+**separate from `consistent()`** (verdict semantics), so a reviewer APPROVE over a red
+frozen gate becomes `stuck(tests_failed)`, not a malformed-verdict re-prompt.
 
 ## 9. Runaway & liveness bounds (no cost caps)
 
@@ -931,6 +987,15 @@ is off (a long unattended run on a server): same prompt, same role, just a remot
 wake-up. Keep its cadence modest and feed it summaries (`LOG.md`, `STATE.json`,
 latest verdicts), so oversight stays a small fraction of the run's cost.
 
+**Stage-T awareness.** Stage T adds long non-LLM operations (provision/freeze/compose/
+final_gate) during which there are no review rounds and no blocking-issue movement —
+exactly what the monitor's "blockers trending down / stage advancing" heuristic would
+misread as a wedge and, in enforcing mode, HALT. So the monitor must treat
+**`operation.phase` / `suite_epoch` advancement as progress**, recognize the new
+stages and `stuck_reason`s (`amendment_conflict`, `composition_failed`, `tests_failed`),
+and `monitor.schema.json`'s `observed` block must gain `operation`/`phase` fields (Stage
+T doc §11).
+
 **Concurrency caveat — and the dead-parent problem (E4).** A single-threaded
 orchestrator is blocked inside `subprocess.run` for up to the per-call timeout, so
 the inline monitor effectively runs only at between-call checkpoints — it can't
@@ -957,13 +1022,23 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
 - `reviewer`: `primary` (codex), `fallback` (claude), `on_limit`
   (fallback/pause) — §6.2.
 - `stage_c.test_command` / `test_timeout_seconds`: the operator-provided command
-  the executed-test gate runs (never derived from the model's plan).
+  the executed-test gate runs (never derived from the model's plan). **When
+  `[stage_t].enabled`, the executed gate is the *frozen Stage T suite* instead** (see
+  `[test_gate]` below); the bare `stage_c.test_command` empty=green path applies only
+  when Stage T is disabled.
 - `sandbox` / permission mode: per stage (least privilege).
-- `gate`: `heavy` / `some` / `none` per stage (defaults follow §2).
+- `gate`: `heavy` / `some` / `none` per stage (defaults follow §2; Tp=`some`, Tt=`none`).
+- `reviewer.on_limit` per stage (e.g. `stage_t.reviewer_on_limit = pause`, §6.2).
 - `behavior.fresh_author_on_revise`, `behavior.stop_on_oscillation`,
   `behavior.dry_run`.
 - `monitor`: `enabled`, `mode` (`off`/`advisory`/`enforcing`), `interval_seconds`,
   `stage_soft_timeout`, `intervene_min_confidence`, `model` (§10.1).
+- **`[stage_t]`** *(acceptance-test phase, see `docs/STAGE-T-test-phase.md`)*:
+  `enabled`, `repeat_runs` (≥1, default 3), `feedback_granularity` (`per_item`),
+  `reviewer_on_limit`, runtime/output `limits.*`, and the visibility-policy caps
+  (per-run, in the contract). **`[test_gate]`**: `adapter` | `command` (argv) — exactly
+  one when enabled — plus `report_path` and `normalizer`. Stage T enablement is **pinned
+  into `STATE.config` at init** so a later toggle can't reshape an in-flight run.
 
 ## 12. Roadmap
 
@@ -994,6 +1069,18 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   unattended runs (a child monitor can't detect a dead parent, §10.1).
 - **M6 — Quality (optional).** N-of-M reviewer voting; swappable reviewer/author
   models; multi-perspective reviewers.
+- **M7 — Stage T: the acceptance-test phase (optional, `[stage_t].enabled`).** The
+  reviewed **Tp (test plan) → Tt (test code)** sub-pipeline that freezes an
+  independent acceptance suite between B and C, plus the **review charter** (§2.1).
+  Closes the greenfield "implementer grades its own homework" hole and mitigates
+  overfitting by giving Stage C the **contract but not the hidden cases**. Full spec
+  + the §10/§11 implementation plan and DESIGN fold-in checklist live in
+  **`docs/STAGE-T-test-phase.md`** (v0.23, reviewed to *sound-within-charter*). Key
+  build deltas: a `stage_kind ∈ {plan, edit}` abstraction + typed `current_artifact`;
+  a `test_gate_ok()` predicate separate from `consistent()`; the canonical-report
+  pytest plugin + runner envelope; the frozen-suite freeze + `validate_test_bundle()`;
+  the `amending`/`suite_epoch` machinery; the visibility split + ephemeral gate tree;
+  a **replaced** Stage C review prompt; and a Stage-T-aware monitor.
 
 ## 13. Open questions
 
@@ -1023,8 +1110,69 @@ Per-run config lives in `STATE.json.config`; defaults in `orchestra.toml`
   runs, and keeping `advisory` the default until its judgment is trusted enough for
   `enforcing`.
 
+## 14. Implementation notes & deviations (built tool)
+
+The working `orchestra.py` implements §1–§12 (the A→B→C pipeline) with these explicit,
+deliberate deviations from the literal spec text — recorded here so they are part of the
+contract, not surprises. **Stage T (§2.1 charter + Tp/Tt, roadmap M7) is specified
+(`docs/STAGE-T-test-phase.md` v0.23) but not yet built** — it layers on this tool.
+
+- **Stage C review uses `codex exec -` with an orchestrator-computed, nonce-fenced
+  diff**, not `codex exec review --uncommitted` (§6). In codex-cli 0.139.0+ the
+  custom `[PROMPT]`/`-` is mutually exclusive with `--uncommitted`/`--base`, so the
+  native path can't carry the trusted test-results/plan/ledger. Computing the diff
+  and fencing it (§3) is also *stronger*: native review would bypass the §3 nonce
+  fence on the diff.
+- **Least-privilege test execution is partial by default** (§2/§10). The gate runs
+  `[stage_c].test_command` with a minimal environment, a temp `HOME`=worktree, and
+  its own process group (killed on timeout), but a stdlib tool cannot portably impose
+  an OS sandbox. True filesystem/network confinement is **operator-provided** via
+  `[stage_c].sandbox_command` (e.g. `firejail`/`sandbox-exec`/`docker`). For the
+  intended threat model (local, offline, benign planned code) the partial default is
+  acceptable; for untrusted code, set `sandbox_command` or run orchestra itself inside
+  a sandbox.
+- **`on_limit = "pause"` is encoded as a resumable in-flight pause** (§6.2): the run
+  stays at its `authoring`/`reviewing` phase with a non-null top-level `paused_reason`
+  (so `orchestra resume` idempotently retries the same call when the limit resets, and
+  the watchdog treats it as an intentional pause, not a hang). A bare
+  `awaiting_human` could not retry the in-flight call, so this is the faithful encoding
+  of "stop and wait for the human/limit."
+- **The interactive escape hatch (`--interactive`, §5) is implemented for Stage A
+  only** (which is interactive by default on a TTY; `--headless` overrides). A
+  hands-on interactive round for the headless Stage B/C loops is **future work**.
+  Interactive Stage A is intentionally **unbounded** (a human is driving — no per-call
+  timeout and no isolation profile, §6.1), but a *launch* failure (e.g. a missing
+  `claude` binary) is still caught and committed as a recoverable `error` rather than
+  escaping the process.
+- **`behavior.fresh_author_on_revise = false` is not implemented** (§13 open item):
+  the author always runs a fresh `--session-id` (the safe default); setting `false`
+  logs a notice and is ignored.
+- **Greenfield Stage C read-containment is cwd-based, not `--tools`-mechanical.** The
+  edit-mode Stage C author needs Edit/Write, so it cannot run with `--tools ""` like the
+  planning authors; its read confinement rests entirely on §6.1's other lever — *a cwd
+  scoped to the code, not the run dir*. For **brownfield** that holds (the worktree is an
+  external user path, so a relative `../reviews/…` can never reach the blackboard). For
+  **greenfield**, the default worktree is `runs/<run>/30-impl` (per §3's one-folder
+  layout), whose parent *is* the blackboard — so independence there relies on the
+  author's cwd-scoped reads rather than being mechanically enforced. Writes are always
+  confined (`acceptEdits` + `--add-dir`), so the blackboard cannot be corrupted. For
+  **mechanically-enforced** greenfield independence, set `[target].worktree_path` to an
+  **external** path: the worktree is created there and only a pointer is stored under
+  `runs/<run>/30-impl` (exactly like brownfield), so `../` never reaches the blackboard.
+
 ## Changelog
 
+- **v0.11** — folded in the **review charter** (§2.1) and **Stage T**, the optional
+  acceptance-test phase, at the load-bearing points (§2 pipeline + stage table, §3
+  blackboard, §11 config, §12 roadmap M7, §10.1 monitor). Stage T inserts a reviewed
+  **Tp (test plan) → Tt (test code)** sub-pipeline between B and C that **freezes an
+  independent acceptance suite** (closing the greenfield self-attestation hole) and
+  gives Stage C the **contract but not the hidden cases** (anti-overfitting). The
+  charter is **elicited in Stage A** and anchors every review to the run's intent
+  (out-of-scope findings → nits, not blockers). Full mechanism, the §10 implementation
+  plan, and the DESIGN fold-in checklist live in **`docs/STAGE-T-test-phase.md`**
+  (v0.23, reviewed across ~11 in-intent passes to *sound-within-charter*). The core
+  §1–§12 tool is built (§14); Stage T (M7) is **specified, not yet built**.
 - **v0.10** — fifth external review (4 MAJOR, several attacking prior fixes). **E1
   (headline):** the curated memory slice is now **enforced**, not advisory — the
   planning author runs `--tools ""` (verified) from an empty staging cwd, so it

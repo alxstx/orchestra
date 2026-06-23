@@ -40,8 +40,10 @@ Assess:
 
 Output your final message as JSON conforming to schemas/monitor.schema.json:
 `assessment` (healthy | warning | intervene), `recommended_action`
-(continue | warn_user | halt), `progressing`, `summary`, `findings` (each with
-`evidence` drawn from the TRUSTED telemetry above), and — for any `halt` — a
-`rationale` that **cites those trusted signals** (round/time/error counts, repeated
-keys), not prose. Recommend `halt` only when the evidence is clear; when uncertain,
-prefer `warning` (or `healthy`). You do not stop the run on a hunch.
+(continue | warn_user | halt), `progressing` (boolean), `summary`, `findings`, and
+— for any `halt` — a `rationale` that **cites trusted signals** (round/time/error
+counts, repeated keys), not prose. **Every entry in `findings` MUST include all of
+`severity` (info | warning | critical), `title`, and `detail`** (plus an optional
+`evidence` drawn from the TRUSTED telemetry above); if you have nothing to report,
+return `findings: []`. Recommend `halt` only when the evidence is clear; when
+uncertain, prefer `warning` (or `healthy`). You do not stop the run on a hunch.

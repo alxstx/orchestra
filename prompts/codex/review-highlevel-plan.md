@@ -35,7 +35,7 @@ Author disputes to rule on (uphold or concede each in `dispute_rulings`):
 </open_disputes>
 
 Already-accepted deviations — do NOT re-raise these:
-<accepted_deviations trust="spec">
+<accepted_deviations untrusted="true">
 {{accepted_deviations}}
 </accepted_deviations>
 

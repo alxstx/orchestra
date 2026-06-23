@@ -27,8 +27,8 @@
     },
     "stuck_reason": {
       "type": ["string", "null"],
-      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "reviewer_unavailable", "error", null],
-      "description": "Required + non-null when status == stuck. 'monitor' = overseer intercepted (§10.1); 'reviewer_unavailable' = both Codex and the Claude fallback unavailable (§6.2). Null otherwise."
+      "enum": ["rejected", "max_rounds", "budget_exceeded", "oscillation", "monitor", "reviewer_unavailable", "tests_failed", "error", null],
+      "description": "Required + non-null when status == stuck. 'monitor' = overseer intercepted (§10.1); 'reviewer_unavailable' = both Codex and the Claude fallback unavailable (§6.2); 'tests_failed' = a reviewer APPROVE was blocked because the orchestrator's executed-test gate was not green (§2/§10). Null otherwise."
     },
     "round": {
       "type": "integer",
@@ -55,6 +55,10 @@
       "type": ["string", "null"],
       "enum": ["author", "review", "decide", "test", null],
       "description": "Fine-grained liveness hint for observability."
+    },
+    "paused_reason": {
+      "type": ["string", "null"],
+      "description": "Non-null when an in-flight call is PAUSED on a subscription usage limit (on_limit=pause / Claude limit, DESIGN §6.2/§9). The status stays in-flight (resume retries the same call), but this marks it as an intentional pause so the watchdog does not flag it as hung. Cleared when the run is next driven."
     },
     "attempts": {
       "type": "integer",

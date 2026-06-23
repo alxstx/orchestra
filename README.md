@@ -28,10 +28,17 @@ disk.
 
 ## Status
 
-🚧 **Design phase.** This repo currently contains the spec, prompt templates,
-schemas, and a non-functional orchestrator skeleton. See
-[`docs/DESIGN.md`](docs/DESIGN.md) for the full design. The loop engine is the
-next build milestone (M1).
+✅ **Working** (Stages A/B/C, M1–M5). `orchestra.py` implements the full pipeline:
+the §4 convergence loop, `(stage, status)` resume dispatch, the §6.1 isolation
+profile, atomic STATE.json + an exclusive run lock, nonce-fenced prompts, the
+anti-regression ledger, oscillation guard, dispute/question round-trips, the
+Codex→Claude reviewer fallback, the executed-test gate, and the supervisory
+monitor + watchdog. Stdlib only; verified against `claude 2.1.185` /
+`codex-cli 0.139.0`, with a unit suite (`test_orchestra.py`) and an end-to-end
+todo-api run (Stage B converged with Codex, Stage C generated a working,
+test-passing implementation presented as a diff — never merged). The optional
+N-of-M voting (M6) and the [`Stage T`](docs/STAGE-T-test-phase.md) acceptance-test
+phase remain future work. See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design.
 
 ## Layout
 
@@ -52,12 +59,24 @@ runs/EXAMPLE-todo-api/  an illustrative (fake) run, for shape reference
 - [`codex`](https://developers.openai.com/codex/cli) CLI (reviewer) — `codex exec` / `codex review`
 - Python 3.11+ (stdlib only)
 
-## Quickstart (planned)
+## Quickstart
 
 ```bash
-orchestra init todo-api --brief brief.md   # create a run
-orchestra run todo-api                      # drive the pipeline
-orchestra status todo-api                   # see where it's at
+# Stage B onward (M1 input contract): seed an approved high-level plan + brief
+python3 orchestra.py init todo-api --stage impl_plan \
+    --brief brief.md --highlevel-plan highlevel.md \
+    --test-command "python3 -m unittest discover"
+python3 orchestra.py run todo-api        # drive Stage B to the approval gate
+python3 orchestra.py status todo-api     # stage / status / round / last verdict
+python3 orchestra.py approve todo-api    # sign off the plan → autonomous Stage C
+# ... Stage C implements in an isolated worktree, runs the test gate, and Codex
+# reviews the diff until it converges; the final diff is PRESENTED, never merged.
+
+python3 orchestra.py resume todo-api     # continue after any interruption
+python3 orchestra.py iterate todo-api --note "..."   # inject feedback / another round
+python3 orchestra.py run todo-api --dry-run --stub-verdicts   # print commands, run nothing
+python3 orchestra.py watchdog            # independent dead/hung-run detection
 ```
 
-> These commands are specified in `docs/DESIGN.md §9` but not yet implemented.
+Run `python3 orchestra.py <cmd> --help` for the full surface. Tests:
+`python3 -m unittest test_orchestra`.

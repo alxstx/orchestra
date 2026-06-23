@@ -58,7 +58,7 @@
         }
       }
     },
-    "rationale": { "type": "string", "description": "Why this assessment — especially required when recommending halt." },
+    "rationale": { "type": "string", "minLength": 1, "description": "Why this assessment — especially required (non-empty) when recommending halt; must cite trusted telemetry." },
     "ts": { "type": "string", "format": "date-time" }
   },
   "allOf": [

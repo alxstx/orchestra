@@ -89,6 +89,18 @@ call_timeout_seconds = 600     # per subprocess hang protection; a hung child is
 [stage_c]
 test_command = ""              # e.g. "pytest -q" or "npm test --silent"
 test_timeout_seconds = 600
+# sandbox_command: an optional prefix that wraps the test command for REAL OS isolation
+# of model-authored code (a stdlib tool can't portably impose a container/seccomp). The
+# gate always runs with a minimal env + temp HOME + own process group (killed on
+# timeout); set this for stronger isolation, e.g.:
+#   sandbox_command = "firejail --net=none --private --quiet"
+#   sandbox_command = "sandbox-exec -f /path/to/profile.sb"     # macOS
+#   sandbox_command = "docker run --rm --network none -v {wt}:/wt -w /wt python:3 --"
+# A non-zero exit MECHANICALLY blocks an autonomous Stage C APPROVE (fail-closed: missing
+# or stale telemetry also blocks) and is NOT waivable by `approve` (§3). For this project's
+# intended threat model (local, offline, benign planned code) the default empty value is
+# acceptable; set sandbox_command for stricter/untrusted deployments.
+sandbox_command = ""
 
 # Where runs and the Stage C worktree live (DESIGN §3/§6). Avoid nesting a foreign
 # worktree under the tool.
@@ -99,7 +111,12 @@ runs_dir = ""                  # where runs/ lives; "" = a user data dir (NOT th
 mode = "greenfield"            # "greenfield" (build from scratch) | "brownfield" (existing repo)
 repo = ""                      # brownfield: path to the user's target git repo
 worktree_path = ""             # brownfield: user-controlled path for `git worktree add`
-                               #   (runs/<run>/30-impl stores only a POINTER, not a nested worktree)
+                               #   (runs/<run>/30-impl stores only a POINTER, not a nested worktree).
+                               # GREENFIELD: also honored — set an EXTERNAL path to get
+                               #   mechanically-enforced read independence for the autonomous Stage C
+                               #   author (its cwd is then outside the run dir, so a relative
+                               #   "../reviews/..." can't reach the blackboard, DESIGN §6.1/§14).
+                               #   Empty = default in-run-dir runs/<run>/30-impl (cwd-scoped reads).
 
 # Supervisory monitor (DESIGN §10.1): an optional concurrent overseer that judges
 # run HEALTH (not the artifact) and writes accumulating reports under monitor/.
@@ -117,8 +134,10 @@ watchdog = "none"              # independent dead/hung detector: "none" | "cron"
 # model = "<judge-model>"      # optional; defaults to a capable judge model
 
 [behavior]
-fresh_author_on_revise = true  # true = fresh session each revise round (independence)
-                               # false = resume author session (cheaper, carries context)
+fresh_author_on_revise = true  # true = fresh session each revise round (independence).
+                               # NOTE: only `true` is wired today — the orchestrator always
+                               # starts a fresh --session-id (the safe default); `false`
+                               # (resume the author session) is not yet implemented (§13).
 stop_on_oscillation = false    # false = give a stage its full max_rounds before giving up
                                #   (oscillation only surfaced as a warning); true = bail
                                #   early to stuck(oscillation) as soon as a loop is detected
